@@ -1,4 +1,4 @@
-# rp2p.c - Direct peer-to-peer service tunneling
+# rp2p.c - peer-to-peer service tunneling
 
 `rp2p.c` is a small C library and CLI for exposing local TCP and UDP services through direct peer-to-peer tunnels.
 
