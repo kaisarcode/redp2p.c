@@ -18,6 +18,7 @@
 #include <string.h>
 #include <time.h>
 #include <errno.h>
+#include <limits.h>
 
 #ifdef _WIN32
 #  include <process.h>
@@ -173,16 +174,19 @@ static int parse_int(const char *text, long min, long max, long *out) {
 /**
  * Loads only index-owned environment configuration.
  * @param opts Index options to populate.
+ * @param seats_set Set when RP2P_SEATS contains a valid value.
  * @return 0 on success, 1 on allocation failure.
  */
-static int load_index_options(rp2p_options_t *opts) {
+static int load_index_options(rp2p_options_t *opts, int *seats_set) {
     const char *value;
     long number;
     size_t len;
 
     value = getenv("RP2P_SEATS");
-    if (parse_decimal(value, 0, RP2P_MAX_PEERS, &number) == 0)
+    if (parse_decimal(value, 0, INT_MAX, &number) == 0) {
         opts->seats = (int)number;
+        *seats_set = 1;
+    }
     value = getenv("RP2P_POW");
     if (parse_decimal(value, 0, 32, &number) == 0)
         opts->pow = (int)number;
@@ -250,18 +254,18 @@ int main(int argc, char **argv) {
         rp2p_options_t opts;
         unsigned short port;
         char vip_err[256];
-        int max_peers;
-        int max_peers_set;
+        int seats;
+        int seats_set;
         int pow_bits;
         int exit_code;
 
         opts = rp2p_options_default();
-        if (load_index_options(&opts) != 0) {
+        seats_set = 0;
+        if (load_index_options(&opts, &seats_set) != 0) {
             fprintf(stderr, "rp2p: failed to load index options\n");
             return 1;
         }
-        max_peers = opts.seats;
-        max_peers_set = getenv("RP2P_SEATS") != NULL;
+        seats = opts.seats;
         pow_bits = opts.pow;
 
         if (argc < 3) {
@@ -279,13 +283,13 @@ int main(int argc, char **argv) {
             if (strcmp(argv[i], "--max") == 0) {
                 long v;
                 if (i + 1 >= argc) { fprintf(stderr, "rp2p: --max requires an argument\n"); rp2p_options_free(&opts); return 1; }
-                if (parse_int(argv[++i], 0, RP2P_MAX_PEERS, &v) != 0) {
+                if (parse_int(argv[++i], 0, INT_MAX, &v) != 0) {
                     fprintf(stderr, "rp2p: invalid --max '%s'\n", argv[i]);
                     rp2p_options_free(&opts);
                     return 1;
                 }
-                max_peers = (int)v;
-                max_peers_set = 1;
+                seats = (int)v;
+                seats_set = 1;
             } else if (strcmp(argv[i], "--pow") == 0) {
                 long v;
                 if (i + 1 >= argc) { fprintf(stderr, "rp2p: --pow requires an argument\n"); rp2p_options_free(&opts); return 1; }
@@ -309,7 +313,13 @@ int main(int argc, char **argv) {
             rp2p_options_free(&opts);
             return 1;
         }
-        if (max_peers_set) rp2p_set_seats(ctx, max_peers);
+        if (seats_set && rp2p_set_seats(ctx, seats) != RP2P_OK) {
+            fprintf(stderr, "rp2p: invalid publisher capacity: %s\n",
+                rp2p_get_error(ctx));
+            rp2p_close(ctx);
+            rp2p_options_free(&opts);
+            return 1;
+        }
         rp2p_set_pow(ctx, pow_bits);
         vip_err[0] = '\0';
         if (rp2p_set_vip(ctx, opts.vip, vip_err, sizeof(vip_err)) != RP2P_OK) {

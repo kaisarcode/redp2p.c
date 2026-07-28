@@ -32,7 +32,6 @@ typedef struct rp2p rp2p_t;
 #define RP2P_EVERSION   -9
 #define RP2P_EPUNCH    -10
 
-#define RP2P_MAX_PEERS     1024
 #define RP2P_ID_MAX         63
 #define RP2P_ADDR_MAX       47
 #define RP2P_BUF          4096

@@ -18,6 +18,7 @@
 #include <string.h>
 #include <signal.h>
 #include <stdatomic.h>
+#include <limits.h>
 
 #ifdef _WIN32
 #include <process.h>
@@ -1984,7 +1985,7 @@ static int case_rp2p_options_default(void) {
 
     rc = 0;
     opts = rp2p_options_default();
-    rc += expect_int("default seats", RP2P_MAX_PEERS, opts.seats);
+    rc += expect_int("default seats are unrestricted", 0, opts.seats);
     rc += expect_int("default pow", 0, opts.pow);
     rc += expect_int("default sweep", 20, opts.sweep);
     rc += expect_true("default vip is NULL", opts.vip == NULL);
@@ -2002,14 +2003,14 @@ static int case_rp2p_options_load_env(void) {
 
     rc = 0;
     opts = rp2p_options_default();
-    test_setenv("RP2P_SEATS", "7");
+    test_setenv("RP2P_SEATS", "1025");
     test_setenv("RP2P_POW", "3");
     test_setenv("RP2P_PASS", "secret");
     test_setenv("RP2P_VIP", "vip vip-pass");
     test_setenv("RP2P_SWEEP", "9");
     test_setenv("RP2P_STUN", "stun:example.com:3478");
     rp2p_options_load_env(&opts);
-    rc += expect_int("env seats", 7, opts.seats);
+    rc += expect_int("env seats above old ceiling", 1025, opts.seats);
     rc += expect_int("env pow", 3, opts.pow);
     rc += expect_string("env pass", "secret", opts.pass);
     rc += expect_string("env vip", "vip vip-pass", opts.vip);
@@ -2034,7 +2035,7 @@ static int case_rp2p_options_load_env(void) {
 static int case_rp2p_options_load_env_invalid(void) {
     static const char *invalid[] = {
         "+1", "-1", " 1", "1 ", "1x", "",
-        "999999999999999999999999", "65536"
+        "999999999999999999999999"
     };
     rp2p_options_t opts;
     int rc;
@@ -2047,12 +2048,17 @@ static int case_rp2p_options_load_env_invalid(void) {
         test_setenv("RP2P_POW", invalid[i]);
         test_setenv("RP2P_SWEEP", invalid[i]);
         rp2p_options_load_env(&opts);
-        rc += expect_int("invalid seats kept default", RP2P_MAX_PEERS,
+        rc += expect_int("invalid seats kept default", 0,
             opts.seats);
         rc += expect_int("invalid pow kept default", 0, opts.pow);
         rc += expect_int("invalid sweep kept default", 20, opts.sweep);
         rp2p_options_free(&opts);
     }
+    opts = rp2p_options_default();
+    test_setenv("RP2P_SEATS", "2147483648");
+    rp2p_options_load_env(&opts);
+    rc += expect_int("overflow seats kept default", 0, opts.seats);
+    rp2p_options_free(&opts);
     opts = rp2p_options_default();
     test_setenv("RP2P_SEATS", "0");
     test_setenv("RP2P_POW", "0");
@@ -3204,6 +3210,12 @@ static int case_rp2p_set_seats(void) {
     rc += expect_int("set seats NULL", RP2P_EINVAL, rp2p_set_seats(NULL, 1));
     rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
     rc += expect_int("set seats positive", RP2P_OK, rp2p_set_seats(ctx, 2));
+    rc += expect_int("set seats above old ceiling", RP2P_OK,
+        rp2p_set_seats(ctx, 1025));
+    rc += expect_int("set platform-limit seats",
+        (size_t)INT_MAX <= SIZE_MAX / sizeof(rp2p_peer_t) ?
+            RP2P_OK : RP2P_EINVAL,
+        rp2p_set_seats(ctx, INT_MAX));
     rc += expect_int("set seats negative", RP2P_EINVAL,
         rp2p_set_seats(ctx, -1));
     rp2p_close(ctx);

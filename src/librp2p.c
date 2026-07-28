@@ -23,6 +23,7 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include <stdatomic.h>
+#include <limits.h>
 
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -648,6 +649,7 @@ struct rp2p {
     int peers_alloc;
     int n_peers_cap;
     int nonvip_cap;
+    int seats_set;
     rp2p_tcp_conn_t *conns;
     int n_conns;
     int conns_cap;
@@ -2248,11 +2250,25 @@ static void rp2p_update_nonvip_cap(rp2p_t *ctx) {
 static int rp2p_ensure_peer_storage(rp2p_t *ctx, int need) {
     rp2p_peer_t *peers;
     int cap;
+    int limit;
 
     if (!ctx) return RP2P_ERROR;
+    limit = INT_MAX;
+    if (SIZE_MAX / sizeof(*ctx->peers) < (size_t)limit)
+        limit = (int)(SIZE_MAX / sizeof(*ctx->peers));
+    if (ctx->seats_set) limit = ctx->n_peers_cap;
+    if (need < 0 || need > limit) return RP2P_EFULL;
+    if ((size_t)need > SIZE_MAX / sizeof(*ctx->peers)) return RP2P_ERROR;
     if (need <= ctx->peers_alloc) return RP2P_OK;
     cap = ctx->peers_alloc > 0 ? ctx->peers_alloc : 8;
-    while (cap < need) cap *= 2;
+    if (cap > limit) cap = limit;
+    while (cap < need) {
+        if (cap > limit / 2) {
+            cap = limit;
+        } else {
+            cap *= 2;
+        }
+    }
     peers = (rp2p_peer_t *)realloc(ctx->peers,
         (size_t)cap * sizeof(rp2p_peer_t));
     if (!peers) return RP2P_ERROR;
@@ -2350,20 +2366,15 @@ static const char *rp2p_get_register_pass(rp2p_t *ctx, const char *id) {
  */
 int rp2p_open(rp2p_t **out) {
     rp2p_t *ctx;
-    rp2p_peer_t *p;
     if (!out) return RP2P_ERROR;
     ctx = (rp2p_t *)calloc(1, sizeof(rp2p_t));
     if (!ctx) return RP2P_ERROR;
-    p = (rp2p_peer_t *)calloc((size_t)RP2P_MAX_PEERS, sizeof(rp2p_peer_t));
-    if (!p) {
-        free(ctx);
-        return RP2P_ERROR;
-    }
-    ctx->peers = p;
+    ctx->peers = NULL;
     ctx->n_peers = 0;
-    ctx->peers_alloc = RP2P_MAX_PEERS;
-    ctx->n_peers_cap = RP2P_MAX_PEERS;
-    ctx->nonvip_cap = RP2P_MAX_PEERS;
+    ctx->peers_alloc = 0;
+    ctx->n_peers_cap = 0;
+    ctx->nonvip_cap = 0;
+    ctx->seats_set = 0;
     ctx->pass[0] = '\0';
     ctx->pow_bits = 0;
     ctx->bind_port = 0;
@@ -2486,7 +2497,7 @@ const char *rp2p_get_error(rp2p_t *ctx) {
 rp2p_options_t rp2p_options_default(void) {
     rp2p_options_t opts;
     memset(&opts, 0, sizeof(opts));
-    opts.seats = RP2P_MAX_PEERS;
+    opts.seats = 0;
     opts.pow = 0;
     opts.sweep = 20;
     return opts;
@@ -2506,7 +2517,8 @@ void rp2p_options_load_env(rp2p_options_t *opts) {
     if (!opts) return;
 
     val = getenv("RP2P_SEATS");
-    if (val && rp2p_parse_env(val, 0, RP2P_MAX_PEERS, &num))
+    if (val && rp2p_parse_env(val, 0, INT_MAX, &num) &&
+        (size_t)num <= SIZE_MAX / sizeof(rp2p_peer_t))
         opts->seats = (int)num;
 
     val = getenv("RP2P_POW");
@@ -2558,12 +2570,12 @@ void rp2p_options_free(rp2p_options_t *opts) {
  */
 int rp2p_set_seats(rp2p_t *ctx, int seats) {
     if (!ctx) return RP2P_EINVAL;
-    if (seats < 0 || seats > RP2P_MAX_PEERS) {
-        rp2p_set_error(ctx, "seats must be between 0 and %d",
-            RP2P_MAX_PEERS);
+    if (seats < 0 || (size_t)seats > SIZE_MAX / sizeof(*ctx->peers)) {
+        rp2p_set_error(ctx, "seats exceeds the platform allocation range");
         return RP2P_EINVAL;
     }
     ctx->n_peers_cap = seats;
+    ctx->seats_set = 1;
     rp2p_update_nonvip_cap(ctx);
     rp2p_set_error(ctx, NULL);
     return RP2P_OK;
@@ -2821,7 +2833,11 @@ static int rp2p_add_peer(rp2p_t *ctx, const char *id)
     }
 
     is_vip = rp2p_find_vip(ctx, id) >= 0;
-    if (!is_vip && rp2p_count_nonvip_peers(ctx) >= ctx->nonvip_cap)
+    if (ctx->n_peers == INT_MAX) return RP2P_EFULL;
+    if (ctx->seats_set && ctx->n_peers >= ctx->n_peers_cap)
+        return RP2P_EFULL;
+    if (ctx->seats_set && !is_vip &&
+        rp2p_count_nonvip_peers(ctx) >= ctx->nonvip_cap)
         return RP2P_EFULL;
     if (rp2p_ensure_peer_storage(ctx, ctx->n_peers + 1) != RP2P_OK)
         return RP2P_ERROR;
