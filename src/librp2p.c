@@ -23,7 +23,6 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include <stdatomic.h>
-#include <limits.h>
 
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -120,6 +119,30 @@ static int rp2p_parse_u(const char *text, long min, long max, long *out) {
 static int rp2p_parse_env(const char *text, long min, long max, long *out) {
     if (!text || text[0] == '\0') return 0;
     return rp2p_parse_u(text, min, max, out);
+}
+
+/**
+ * Parses one strict unsigned decimal size value.
+ * @param text Input text to parse.
+ * @param out Output parsed value.
+ * @return 1 on success, 0 on invalid input or overflow.
+ */
+static int rp2p_parse_size(const char *text, size_t *out) {
+    size_t value;
+    size_t i;
+
+    if (!text || !text[0] || !out) return 0;
+    value = 0;
+    for (i = 0; text[i] != '\0'; i++) {
+        size_t digit;
+
+        if (text[i] < '0' || text[i] > '9') return 0;
+        digit = (size_t)(text[i] - '0');
+        if (value > (SIZE_MAX - digit) / 10) return 0;
+        value = value * 10 + digit;
+    }
+    *out = value;
+    return 1;
 }
 
 #define RP2P_ETIMEOUT_SEC     15
@@ -645,17 +668,17 @@ typedef struct {
 
 struct rp2p {
     rp2p_peer_t *peers;
-    int n_peers;
-    int peers_alloc;
-    int n_peers_cap;
-    int nonvip_cap;
+    size_t n_peers;
+    size_t peers_alloc;
+    size_t n_peers_cap;
+    size_t nonvip_cap;
     int seats_set;
     rp2p_tcp_conn_t *conns;
     int n_conns;
     int conns_cap;
     rp2p_vip_entry_t *vips;
-    int n_vips;
-    int vips_cap;
+    size_t n_vips;
+    size_t vips_cap;
     char key[RP2P_KEY_STR_SZ];
     char pass[RP2P_PASS_MAX + 1];
     int pow_bits;
@@ -756,7 +779,7 @@ static int rp2p_candidate_sockaddr(const rp2p_candidate_t *candidate,
     struct sockaddr_storage *out);
 static int rp2p_is_space(char ch);
 static char *rp2p_trim(char *text);
-static int rp2p_find_vip(rp2p_t *ctx, const char *id);
+static size_t rp2p_find_vip(rp2p_t *ctx, const char *id);
 static int rp2p_add_vip(rp2p_t *ctx, const char *id, const char *pass,
     char *err, size_t err_cap);
 static const char *rp2p_get_register_pass(rp2p_t *ctx, const char *id);
@@ -2218,16 +2241,16 @@ static char *rp2p_trim(char *text) {
  * Finds one VIP seat by identifier.
  * @param ctx Open context.
  * @param id Reserved seat identifier.
- * @return VIP index on success, -1 when missing.
+ * @return VIP index on success, SIZE_MAX when missing.
  */
-static int rp2p_find_vip(rp2p_t *ctx, const char *id) {
-    int i;
+static size_t rp2p_find_vip(rp2p_t *ctx, const char *id) {
+    size_t i;
 
-    if (!ctx || !id) return -1;
+    if (!ctx || !id) return SIZE_MAX;
     for (i = 0; i < ctx->n_vips; i++) {
         if (strcmp(ctx->vips[i].id, id) == 0) return i;
     }
-    return -1;
+    return SIZE_MAX;
 }
 
 /**
@@ -2237,8 +2260,11 @@ static int rp2p_find_vip(rp2p_t *ctx, const char *id) {
  */
 static void rp2p_update_nonvip_cap(rp2p_t *ctx) {
     if (!ctx) return;
-    ctx->nonvip_cap = ctx->n_peers_cap - ctx->n_vips;
-    if (ctx->nonvip_cap < 0) ctx->nonvip_cap = 0;
+    if (ctx->n_vips >= ctx->n_peers_cap) {
+        ctx->nonvip_cap = 0;
+    } else {
+        ctx->nonvip_cap = ctx->n_peers_cap - ctx->n_vips;
+    }
 }
 
 /**
@@ -2247,18 +2273,15 @@ static void rp2p_update_nonvip_cap(rp2p_t *ctx) {
  * @param need Required peer slots.
  * @return RP2P_OK on success, RP2P_ERROR on allocation failure.
  */
-static int rp2p_ensure_peer_storage(rp2p_t *ctx, int need) {
+static int rp2p_ensure_peer_storage(rp2p_t *ctx, size_t need) {
     rp2p_peer_t *peers;
-    int cap;
-    int limit;
+    size_t cap;
+    size_t limit;
 
     if (!ctx) return RP2P_ERROR;
-    limit = INT_MAX;
-    if (SIZE_MAX / sizeof(*ctx->peers) < (size_t)limit)
-        limit = (int)(SIZE_MAX / sizeof(*ctx->peers));
+    limit = SIZE_MAX / sizeof(*ctx->peers);
     if (ctx->seats_set) limit = ctx->n_peers_cap;
-    if (need < 0 || need > limit) return RP2P_EFULL;
-    if ((size_t)need > SIZE_MAX / sizeof(*ctx->peers)) return RP2P_ERROR;
+    if (need > limit) return RP2P_EFULL;
     if (need <= ctx->peers_alloc) return RP2P_OK;
     cap = ctx->peers_alloc > 0 ? ctx->peers_alloc : 8;
     if (cap > limit) cap = limit;
@@ -2269,8 +2292,8 @@ static int rp2p_ensure_peer_storage(rp2p_t *ctx, int need) {
             cap *= 2;
         }
     }
-    peers = (rp2p_peer_t *)realloc(ctx->peers,
-        (size_t)cap * sizeof(rp2p_peer_t));
+    if (cap > SIZE_MAX / sizeof(*ctx->peers)) return RP2P_ERROR;
+    peers = (rp2p_peer_t *)realloc(ctx->peers, cap * sizeof(*ctx->peers));
     if (!peers) return RP2P_ERROR;
     ctx->peers = peers;
     ctx->peers_alloc = cap;
@@ -2282,14 +2305,14 @@ static int rp2p_ensure_peer_storage(rp2p_t *ctx, int need) {
  * @param ctx Open context.
  * @return Number of online non-VIP peers.
  */
-static int rp2p_count_nonvip_peers(rp2p_t *ctx) {
-    int i;
-    int count;
+static size_t rp2p_count_nonvip_peers(rp2p_t *ctx) {
+    size_t i;
+    size_t count;
 
     if (!ctx) return 0;
     count = 0;
     for (i = 0; i < ctx->n_peers; i++) {
-        if (rp2p_find_vip(ctx, ctx->peers[i].id) < 0) count++;
+        if (rp2p_find_vip(ctx, ctx->peers[i].id) == SIZE_MAX) count++;
     }
     return count;
 }
@@ -2307,7 +2330,7 @@ static int rp2p_add_vip(rp2p_t *ctx, const char *id, const char *pass,
     char *err, size_t err_cap)
 {
     rp2p_vip_entry_t *vips;
-    int cap;
+    size_t cap;
 
     if (!ctx || !id || !pass) return RP2P_ERROR;
     if (!rp2p_is_valid_id(id)) {
@@ -2320,15 +2343,25 @@ static int rp2p_add_vip(rp2p_t *ctx, const char *id, const char *pass,
             snprintf(err, err_cap, "RP2P_VIP invalid password for id '%s'", id);
         return RP2P_ERROR;
     }
-    if (rp2p_find_vip(ctx, id) >= 0) {
+    if (rp2p_find_vip(ctx, id) != SIZE_MAX) {
         if (err && err_cap > 0)
             snprintf(err, err_cap, "RP2P_VIP redefines reserved id '%s'", id);
         return RP2P_ERROR;
     }
     if (ctx->n_vips >= ctx->vips_cap) {
+        if (ctx->vips_cap > SIZE_MAX / 2) {
+            if (err && err_cap > 0)
+                snprintf(err, err_cap, "RP2P_VIP table capacity overflow");
+            return RP2P_ERROR;
+        }
         cap = ctx->vips_cap > 0 ? ctx->vips_cap * 2 : 8;
+        if (cap > SIZE_MAX / sizeof(*ctx->vips)) {
+            if (err && err_cap > 0)
+                snprintf(err, err_cap, "RP2P_VIP table allocation overflow");
+            return RP2P_ERROR;
+        }
         vips = (rp2p_vip_entry_t *)realloc(ctx->vips,
-            (size_t)cap * sizeof(rp2p_vip_entry_t));
+            cap * sizeof(*ctx->vips));
         if (!vips) {
             if (err && err_cap > 0)
                 snprintf(err, err_cap, "failed to allocate RP2P_VIP table");
@@ -2352,11 +2385,11 @@ static int rp2p_add_vip(rp2p_t *ctx, const char *id, const char *pass,
  * @return VIP password when reserved, otherwise the global password.
  */
 static const char *rp2p_get_register_pass(rp2p_t *ctx, const char *id) {
-    int idx;
+    size_t idx;
 
     if (!ctx) return "";
     idx = rp2p_find_vip(ctx, id);
-    if (idx >= 0) return ctx->vips[idx].pass;
+    if (idx != SIZE_MAX) return ctx->vips[idx].pass;
     return ctx->pass;
 }
 
@@ -2411,10 +2444,10 @@ int rp2p_close(rp2p_t *ctx) {
         crypto_wipe(ctx->conns, (size_t)ctx->conns_cap * sizeof(*ctx->conns));
     free(ctx->conns);
     if (ctx->vips)
-        crypto_wipe(ctx->vips, (size_t)ctx->vips_cap * sizeof(*ctx->vips));
+        crypto_wipe(ctx->vips, ctx->vips_cap * sizeof(*ctx->vips));
     free(ctx->vips);
     if (ctx->peers)
-        crypto_wipe(ctx->peers, (size_t)ctx->peers_alloc * sizeof(*ctx->peers));
+        crypto_wipe(ctx->peers, ctx->peers_alloc * sizeof(*ctx->peers));
     free(ctx->peers);
 #ifdef _WIN32
     DeleteCriticalSection(&ctx->mutex);
@@ -2513,13 +2546,14 @@ rp2p_options_t rp2p_options_default(void) {
 void rp2p_options_load_env(rp2p_options_t *opts) {
     const char *val;
     long num;
+    size_t seats;
 
     if (!opts) return;
 
     val = getenv("RP2P_SEATS");
-    if (val && rp2p_parse_env(val, 0, INT_MAX, &num) &&
-        (size_t)num <= SIZE_MAX / sizeof(rp2p_peer_t))
-        opts->seats = (int)num;
+    if (rp2p_parse_size(val, &seats) &&
+        seats <= SIZE_MAX / sizeof(rp2p_peer_t))
+        opts->seats = seats;
 
     val = getenv("RP2P_POW");
     if (val && rp2p_parse_env(val, 0, RP2P_POW_MAX, &num))
@@ -2568,9 +2602,9 @@ void rp2p_options_free(rp2p_options_t *opts) {
  * Set seats.
  * @return 0 on success, -1 on error.
  */
-int rp2p_set_seats(rp2p_t *ctx, int seats) {
+int rp2p_set_seats(rp2p_t *ctx, size_t seats) {
     if (!ctx) return RP2P_EINVAL;
-    if (seats < 0 || (size_t)seats > SIZE_MAX / sizeof(*ctx->peers)) {
+    if (seats > SIZE_MAX / sizeof(*ctx->peers)) {
         rp2p_set_error(ctx, "seats exceeds the platform allocation range");
         return RP2P_EINVAL;
     }
@@ -2706,7 +2740,7 @@ size_t err_cap
 
     if (!ctx) return RP2P_ERROR;
     if (ctx->vips)
-        crypto_wipe(ctx->vips, (size_t)ctx->vips_cap * sizeof(*ctx->vips));
+        crypto_wipe(ctx->vips, ctx->vips_cap * sizeof(*ctx->vips));
     free(ctx->vips);
     ctx->vips = NULL;
     ctx->n_vips = 0;
@@ -2736,7 +2770,7 @@ size_t err_cap
             free(copy);
             if (ctx->vips)
                 crypto_wipe(ctx->vips,
-                    (size_t)ctx->vips_cap * sizeof(*ctx->vips));
+                    ctx->vips_cap * sizeof(*ctx->vips));
             free(ctx->vips);
             ctx->vips = NULL;
             ctx->n_vips = 0;
@@ -2753,7 +2787,7 @@ size_t err_cap
             free(copy);
             if (ctx->vips)
                 crypto_wipe(ctx->vips,
-                    (size_t)ctx->vips_cap * sizeof(*ctx->vips));
+                    ctx->vips_cap * sizeof(*ctx->vips));
             free(ctx->vips);
             ctx->vips = NULL;
             ctx->n_vips = 0;
@@ -2770,15 +2804,16 @@ size_t err_cap
 
 /**
  * Find peer.
- * @return 0 on success, -1 on error.
+ * @return Peer index on success, SIZE_MAX when missing.
  */
-static int rp2p_find_peer(rp2p_t *ctx, const char *id) {
-    int i;
+static size_t rp2p_find_peer(rp2p_t *ctx, const char *id) {
+    size_t i;
+
     for (i = 0; i < ctx->n_peers; i++) {
         if (strcmp(ctx->peers[i].id, id) == 0)
             return i;
     }
-    return -1;
+    return SIZE_MAX;
 }
 
 /**
@@ -2787,13 +2822,16 @@ static int rp2p_find_peer(rp2p_t *ctx, const char *id) {
  */
 static void rp2p_evict_stale(rp2p_t *ctx) {
     uint64_t now;
-    int i;
+    size_t i;
+
     now = rp2p_now_s();
-    for (i = ctx->n_peers - 1; i >= 0; i--) {
+    i = ctx->n_peers;
+    while (i > 0) {
+        i--;
         if (now - ctx->peers[i].last_seen > RP2P_ETIMEOUT_SEC) {
             if (i < ctx->n_peers - 1) {
                 memmove(&ctx->peers[i], &ctx->peers[i + 1],
-                    (size_t)(ctx->n_peers - i - 1) * sizeof(ctx->peers[0]));
+                    (ctx->n_peers - i - 1) * sizeof(ctx->peers[0]));
             }
             ctx->n_peers--;
         }
@@ -2821,21 +2859,22 @@ static int rp2p_generate_key(char *out) {
 static int rp2p_add_peer(rp2p_t *ctx, const char *id)
 {
     size_t id_len;
-    int idx;
+    size_t idx;
     int is_vip;
 
     idx = rp2p_find_peer(ctx, id);
-    if (idx >= 0) {
+    if (idx != SIZE_MAX) {
         ctx->peers[idx].last_seen = rp2p_now_s();
         if (!rp2p_generate_key(ctx->peers[idx].key))
             return RP2P_ERROR;
         return RP2P_OK;
     }
 
-    is_vip = rp2p_find_vip(ctx, id) >= 0;
-    if (ctx->n_peers == INT_MAX) return RP2P_EFULL;
+    is_vip = rp2p_find_vip(ctx, id) != SIZE_MAX;
     if (ctx->seats_set && ctx->n_peers >= ctx->n_peers_cap)
         return RP2P_EFULL;
+    if (ctx->n_peers >= SIZE_MAX / sizeof(*ctx->peers))
+        return RP2P_ERROR;
     if (ctx->seats_set && !is_vip &&
         rp2p_count_nonvip_peers(ctx) >= ctx->nonvip_cap)
         return RP2P_EFULL;
@@ -2860,12 +2899,13 @@ static int rp2p_add_peer(rp2p_t *ctx, const char *id)
  * @return 0 on success, -1 on error.
  */
 static int rp2p_remove_peer(rp2p_t *ctx, const char *id) {
-    int idx;
+    size_t idx;
+
     idx = rp2p_find_peer(ctx, id);
-    if (idx < 0) return RP2P_ENOENT;
+    if (idx == SIZE_MAX) return RP2P_ENOENT;
     if (idx < ctx->n_peers - 1) {
         memmove(&ctx->peers[idx], &ctx->peers[idx + 1],
-            (size_t)(ctx->n_peers - idx - 1) * sizeof(ctx->peers[0]));
+            (ctx->n_peers - idx - 1) * sizeof(ctx->peers[0]));
     }
     ctx->n_peers--;
     return RP2P_OK;
@@ -2881,10 +2921,10 @@ static int rp2p_remove_peer(rp2p_t *ctx, const char *id) {
  */
 static int rp2p_refresh_peer(rp2p_t *ctx, const char *id)
 {
-    int idx;
+    size_t idx;
 
     idx = rp2p_find_peer(ctx, id);
-    if (idx < 0) return RP2P_ENOENT;
+    if (idx == SIZE_MAX) return RP2P_ENOENT;
     ctx->peers[idx].last_seen = rp2p_now_s();
     return RP2P_OK;
 }
@@ -2987,10 +3027,10 @@ static int rp2p_store_pow_challenge(rp2p_t *ctx,
 static int rp2p_format_register_ok(rp2p_t *ctx, const char *id,
     char *reply, size_t reply_sz)
 {
-    int pidx;
+    size_t pidx;
 
     pidx = rp2p_find_peer(ctx, id);
-    if (pidx < 0) return 0;
+    if (pidx == SIZE_MAX) return 0;
     snprintf(reply, reply_sz, "%s%s", RP2P_CTRTOK_OK_KEY,
         ctx->peers[pidx].key);
     return 1;
@@ -4788,7 +4828,7 @@ char **consumed_end)
     char message[RP2P_BUF];
     char *block_end;
     int target_fd;
-    int peer_index;
+    size_t peer_index;
     int pending_index;
     int i;
 
@@ -4813,7 +4853,7 @@ char **consumed_end)
         }
     }
     peer_index = rp2p_find_peer(ctx, target_id);
-    if (target_fd == -1 || peer_index < 0) {
+    if (target_fd == -1 || peer_index == SIZE_MAX) {
         rp2p_tcp_send(connection->fd, RP2P_CTRTOK_ERROR_OFFLINE);
         return RP2P_INDEX_ACTION_KEEP;
     }
@@ -4912,12 +4952,12 @@ const char *command_line)
 {
     char id[RP2P_ID_MAX + 1];
     char key[RP2P_KEY_STR_SZ];
-    int peer_index;
+    size_t peer_index;
 
     memset(key, 0, sizeof(key));
     if (rp2p_parse_deregister(command_line, id, key)) {
         peer_index = rp2p_find_peer(ctx, id);
-        if (peer_index >= 0 &&
+        if (peer_index != SIZE_MAX &&
             strcmp(ctx->peers[peer_index].key, key) == 0)
         {
             rp2p_remove_peer(ctx, id);
@@ -4946,7 +4986,7 @@ rp2p_tcp_conn_t *connection,
 const char *command_line)
 {
     char reply[RP2P_BUF];
-    int peer_index;
+    size_t peer_index;
 
     if (strcmp(command_line, RP2P_CTRTOK_LIST_PUBLISHERS) != 0) {
         rp2p_tcp_send(connection->fd, RP2P_CTRTOK_ERROR_MALFORMED);
@@ -4976,11 +5016,11 @@ const char *command_line)
 {
     char id[RP2P_ID_MAX + 1];
     char reply[RP2P_BUF];
-    int peer_index;
+    size_t peer_index;
 
     if (rp2p_parse_lookup(command_line, id)) {
         peer_index = rp2p_find_peer(ctx, id);
-        if (peer_index >= 0) {
+        if (peer_index != SIZE_MAX) {
             snprintf(reply, sizeof(reply), "%s%s", RP2P_CTRTOK_PUBLISHER,
                 ctx->peers[peer_index].id);
             rp2p_tcp_send(connection->fd, reply);

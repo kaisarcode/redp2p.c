@@ -85,7 +85,8 @@ The following invariants must be preserved unless the project owner explicitly i
 * index state remains temporary
 * the index requires no persistent database
 * publisher deregistration keys remain local, scoped, minimal persistent state
-* protocol fields, candidate sets, pending punches, proof challenges, and index publisher capacity remain bounded
+* protocol fields, candidate sets, pending punches, and proof challenges remain bounded
+* configured index publisher capacity is enforced through seats, including inactive VIP reservations
 * the project remains usable on modest hardware
 * the code remains inspectable by one person
 
@@ -228,6 +229,8 @@ Avoid:
 * additional compilation units for tightly coupled implementation details
 
 Session and control-connection tables currently grow with active local work and are ultimately constrained by descriptors and `select()` representation rather than one fixed application-level session maximum. Do not claim every allocation has a strict static bound. Prefer explicit limits when changing these paths, and never add unbounded queues or retained history.
+
+Publisher storage grows dynamically. Without configured seats, it has no application-level publisher capacity limit. When seats is configured through `--seats`, `RP2P_SEATS`, or `rp2p_set_seats()`, treat it as the total publisher capacity. Each VIP reservation occupies one seat even while inactive, and non-VIP publishers use the remainder. Zero accepts no publishers. Keep allocation arithmetic checked without presenting implementation safety checks as product capacity limits.
 
 ## Source Layout
 

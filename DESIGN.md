@@ -159,7 +159,7 @@ Optional controls include:
 * global publisher password
 * reserved publisher IDs with individual passwords
 * proof-of-work registration cost
-* bounded publisher capacity
+* optional operator-configured publisher capacity
 
 Registration protection exists to control index use and resource occupation.
 
@@ -185,11 +185,11 @@ The key authorizes `del` for one registration scope. It is not user identity, pe
 
 The design should prefer:
 
-* bounded tables
-* fixed limits
+* explicit bounds for protocol fields, candidates, pending punches, and proof challenges
+* checked dynamic storage for active runtime state
 * explicit timeouts
 * automatic stale-state removal
-* clean failure when capacity is exhausted
+* clean failure when configured capacity is exhausted
 
 Databases, synchronized key stores, registration history, and persistent index state are outside the project scope.
 
@@ -227,13 +227,16 @@ The project must remain suitable for modest systems.
 Design choices should prefer:
 
 * bounded protocol fields and datagrams
-* bounded candidate, pending-punch, proof-challenge, and publisher tables
+* bounded candidate, pending-punch, and proof-challenge tables
+* checked dynamic publisher storage with optional operator-configured capacity
 * bounded candidate lists
 * bounded port sweeps
 * explicit socket ownership
 * deterministic cleanup
 * limited background threads
 * no mandatory external services
+
+Publisher storage grows dynamically as publishers become active. When `--seats` or `RP2P_SEATS` is configured, seats is the total publisher capacity. Each VIP reservation occupies one seat even while inactive, and non-VIP publishers use the remaining seats. Without either setting, no application-level publisher limit applies. Removing an active publisher releases its occupancy, while a VIP reservation remains reserved for that VIP.
 
 Active publisher and consumer session arrays and index control-connection storage grow with live descriptors and are constrained by `select()` representation rather than one fixed session count. They do not retain completed work. Unbounded queues, hidden history, and infrastructure-dependent behavior should be rejected.
 

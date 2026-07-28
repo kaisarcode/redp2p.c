@@ -22,10 +22,10 @@ Start an index server:
 rp2p idx 9876
 ```
 
-Start an index with limited publisher capacity:
+Start an index with publisher seats:
 
 ```bash
-rp2p idx 9876 --max 128
+rp2p idx 9876 --seats 128
 ```
 
 Start an index with proof-of-work registration cost:
@@ -79,7 +79,7 @@ rp2p del web@idx.example.com:9876
 | Command/Flag                           | Description                                   |
 | :------------------------------------- | :-------------------------------------------- |
 | `idx <port>`                           | Start an index server                         |
-| `idx <port> --max <N>`                 | Limit publisher capacity                      |
+| `idx <port> --seats <N>`               | Set total publisher seats to `N`               |
 | `idx <port> --pow <N>`                 | Set publisher registration proof-of-work cost |
 | `set <id>@<index[:port]> --tcp <port>` | Publish a local TCP service                   |
 | `set <id>@<index[:port]> --udp <port>` | Publish a local UDP service                   |
@@ -109,6 +109,8 @@ RP2P_STUN
 ```
 
 `RP2P_PASS`, `RP2P_VIP`, and proof-of-work protect publisher registration and index capacity.
+
+`RP2P_SEATS=N` is equivalent to `idx --seats N`. Without either setting, the index has no publisher limit. When configured, `N` is the total number of publisher seats. Each VIP reservation occupies one seat even while that VIP is inactive; non-VIP publishers use the remaining seats. A value of `0` accepts no publishers. When both are present, `--seats` takes precedence.
 
 ---
 

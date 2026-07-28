@@ -18,7 +18,6 @@
 #include <string.h>
 #include <time.h>
 #include <errno.h>
-#include <limits.h>
 
 #ifdef _WIN32
 #  include <process.h>
@@ -55,6 +54,30 @@ static int parse_decimal(const char *text, long min, long max, long *out) {
     }
     if (value < (unsigned long)min) return 1;
     *out = (long)value;
+    return 0;
+}
+
+/**
+ * Parses one ASCII decimal size value.
+ * @param text Input decimal text.
+ * @param out Output parsed value.
+ * @return 0 on success, 1 on invalid input or overflow.
+ */
+static int parse_size(const char *text, size_t *out) {
+    size_t value;
+    size_t i;
+
+    if (!text || !text[0] || !out) return 1;
+    value = 0;
+    for (i = 0; text[i] != '\0'; i++) {
+        size_t digit;
+
+        if (text[i] < '0' || text[i] > '9') return 1;
+        digit = (size_t)(text[i] - '0');
+        if (value > (SIZE_MAX - digit) / 10) return 1;
+        value = value * 10 + digit;
+    }
+    *out = value;
     return 0;
 }
 
@@ -180,11 +203,15 @@ static int parse_int(const char *text, long min, long max, long *out) {
 static int load_index_options(rp2p_options_t *opts, int *seats_set) {
     const char *value;
     long number;
+    size_t seats;
     size_t len;
 
     value = getenv("RP2P_SEATS");
-    if (parse_decimal(value, 0, INT_MAX, &number) == 0) {
-        opts->seats = (int)number;
+    if (value) {
+        if (parse_size(value, &seats) != 0 ||
+            seats > SIZE_MAX / sizeof(rp2p_peer_t))
+            return 1;
+        opts->seats = seats;
         *seats_set = 1;
     }
     value = getenv("RP2P_POW");
@@ -214,7 +241,7 @@ static void print_help(const char *name) {
     printf("Usage: %s <command> [options]\n", name);
     printf("\n");
     printf("Commands:\n");
-    printf("  idx <port> [--max <N>] [--pow <N>] Start index server on TCP control port\n");
+    printf("  idx <port> [--seats <N>] [--pow <N>] Start index with publisher seats\n");
     printf("  set <host>@<index[:port]> --tcp <port> [--sweep <n>] [--stun <url>]\n");
     printf("  set <host>@<index[:port]> --udp <port> [--sweep <n>] [--stun <url>]\n");
     printf("  del <host>@<index[:port]> Deregister from index\n");
@@ -222,6 +249,7 @@ static void print_help(const char *name) {
     printf("  con <host>@<index[:port]> --udp <port> [--sweep <n>] [--stun <url>]\n");
     printf("\n");
     printf("Environment:\n");
+    printf("  RP2P_SEATS              Publisher seats; VIPs count; unset means no limit\n");
     printf("  RP2P_POW                PoW bits for index registration (0..32)\n");
     printf("  RP2P_PASS               Optional shared password for REGISTER/set protection\n");
     printf("  RP2P_VIP                Reserved seat passwords as '<id> <pass> ...'\n");
@@ -254,7 +282,7 @@ int main(int argc, char **argv) {
         rp2p_options_t opts;
         unsigned short port;
         char vip_err[256];
-        int seats;
+        size_t seats;
         int seats_set;
         int pow_bits;
         int exit_code;
@@ -280,15 +308,13 @@ int main(int argc, char **argv) {
         }
 
         for (int i = 3; i < argc; i++) {
-            if (strcmp(argv[i], "--max") == 0) {
-                long v;
-                if (i + 1 >= argc) { fprintf(stderr, "rp2p: --max requires an argument\n"); rp2p_options_free(&opts); return 1; }
-                if (parse_int(argv[++i], 0, INT_MAX, &v) != 0) {
-                    fprintf(stderr, "rp2p: invalid --max '%s'\n", argv[i]);
+            if (strcmp(argv[i], "--seats") == 0) {
+                if (i + 1 >= argc) { fprintf(stderr, "rp2p: --seats requires an argument\n"); rp2p_options_free(&opts); return 1; }
+                if (parse_size(argv[++i], &seats) != 0) {
+                    fprintf(stderr, "rp2p: invalid --seats '%s'\n", argv[i]);
                     rp2p_options_free(&opts);
                     return 1;
                 }
-                seats = (int)v;
                 seats_set = 1;
             } else if (strcmp(argv[i], "--pow") == 0) {
                 long v;

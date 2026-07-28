@@ -52,7 +52,7 @@ typedef struct rp2p rp2p_t;
 #define RP2P_STUN_BINDING_RESP 0x0101
 
 typedef struct rp2p_options {
-    int seats;
+    size_t seats;
     int pow;
     char pass[RP2P_PASS_MAX + 1];
     char *vip;
@@ -256,10 +256,12 @@ void *userdata
 );
 
 /**
- * Sets the index publisher capacity.
+ * Sets the number of index publisher seats.
+ * @param ctx Open context.
+ * @param seats Total publisher seats; VIP reservations count toward the total.
  * @return RP2P_OK or RP2P_EINVAL.
  */
-int rp2p_set_seats(rp2p_t *ctx, int seats);
+int rp2p_set_seats(rp2p_t *ctx, size_t seats);
 
 /**
  * Sets registration proof difficulty.

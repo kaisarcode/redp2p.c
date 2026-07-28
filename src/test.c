@@ -18,7 +18,6 @@
 #include <string.h>
 #include <signal.h>
 #include <stdatomic.h>
-#include <limits.h>
 
 #ifdef _WIN32
 #include <process.h>
@@ -106,7 +105,7 @@ typedef struct {
 
 typedef struct {
     char ids[8][RP2P_ID_MAX + 1];
-    int count;
+    size_t count;
 } test_publishers_t;
 
 static char test_home_path[512];
@@ -131,7 +130,7 @@ static void test_port_requirement(unsigned int offset, int *tcp, int *udp) {
     *tcp = 0;
     *udp = 0;
     if (strcmp(test_case_name, "rp2p_serve_index") == 0) {
-        *tcp = offset >= 1U && offset <= 3U;
+        *tcp = offset >= 1U && offset <= 4U;
     } else if (strcmp(test_case_name, "rp2p_wait") == 0) {
         *tcp = offset == 20U || offset == 22U;
     } else if (strcmp(test_case_name, "rp2p_connect") == 0) {
@@ -874,6 +873,22 @@ static int expect_int(const char *name, int expected, int actual) {
 }
 
 /**
+ * Checks one size value.
+ * @param name Check name.
+ * @param expected Expected value.
+ * @param actual Actual value.
+ * @return 0 on success, 1 on failure.
+ */
+static int expect_size(const char *name, size_t expected, size_t actual) {
+    if (expected != actual) {
+        printf("[FAIL] %s: expected %zu, got %zu\n", name, expected, actual);
+        return 1;
+    }
+    printf("[PASS] %s\n", name);
+    return 0;
+}
+
+/**
  * Checks one true condition.
  * @param name Check name.
  * @param condition Condition value.
@@ -1268,7 +1283,7 @@ static int test_index_start(test_index_t *index, unsigned short port) {
  * @return 0 on success, 1 on failure.
  */
 static int test_index_start_configured(test_index_t *index,
-    unsigned short port, int seats, const char *vip, const char *pass)
+    unsigned short port, size_t seats, const char *vip, const char *pass)
 {
     char err[128];
 
@@ -1967,7 +1982,7 @@ static void test_on_publisher(const char *id, void *userdata) {
  * @return 1 when present, 0 otherwise.
  */
 static int test_has_publisher(test_publishers_t *publishers, const char *id) {
-    int i;
+    size_t i;
 
     for (i = 0; i < publishers->count; i++) {
         if (strcmp(publishers->ids[i], id) == 0) return 1;
@@ -1985,7 +2000,7 @@ static int case_rp2p_options_default(void) {
 
     rc = 0;
     opts = rp2p_options_default();
-    rc += expect_int("default seats are unrestricted", 0, opts.seats);
+    rc += expect_size("default seats are unrestricted", 0, opts.seats);
     rc += expect_int("default pow", 0, opts.pow);
     rc += expect_int("default sweep", 20, opts.sweep);
     rc += expect_true("default vip is NULL", opts.vip == NULL);
@@ -2003,14 +2018,14 @@ static int case_rp2p_options_load_env(void) {
 
     rc = 0;
     opts = rp2p_options_default();
-    test_setenv("RP2P_SEATS", "1025");
+    test_setenv("RP2P_SEATS", "7");
     test_setenv("RP2P_POW", "3");
     test_setenv("RP2P_PASS", "secret");
     test_setenv("RP2P_VIP", "vip vip-pass");
     test_setenv("RP2P_SWEEP", "9");
     test_setenv("RP2P_STUN", "stun:example.com:3478");
     rp2p_options_load_env(&opts);
-    rc += expect_int("env seats above old ceiling", 1025, opts.seats);
+    rc += expect_size("env seats", 7, opts.seats);
     rc += expect_int("env pow", 3, opts.pow);
     rc += expect_string("env pass", "secret", opts.pass);
     rc += expect_string("env vip", "vip vip-pass", opts.vip);
@@ -2034,12 +2049,14 @@ static int case_rp2p_options_load_env(void) {
  */
 static int case_rp2p_options_load_env_invalid(void) {
     static const char *invalid[] = {
-        "+1", "-1", " 1", "1 ", "1x", "",
-        "999999999999999999999999"
+        "+1", "-1", " 1", "1 ", "1x", ""
     };
+    char allocation_overflow[64];
+    char numeric_overflow[64];
     rp2p_options_t opts;
     int rc;
     size_t i;
+    size_t max_peer_count;
 
     rc = 0;
     for (i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
@@ -2048,23 +2065,33 @@ static int case_rp2p_options_load_env_invalid(void) {
         test_setenv("RP2P_POW", invalid[i]);
         test_setenv("RP2P_SWEEP", invalid[i]);
         rp2p_options_load_env(&opts);
-        rc += expect_int("invalid seats kept default", 0,
+        rc += expect_size("invalid seats kept default", 0,
             opts.seats);
         rc += expect_int("invalid pow kept default", 0, opts.pow);
         rc += expect_int("invalid sweep kept default", 20, opts.sweep);
         rp2p_options_free(&opts);
     }
+    max_peer_count = SIZE_MAX / sizeof(rp2p_peer_t);
+    snprintf(allocation_overflow, sizeof(allocation_overflow), "%zu",
+        max_peer_count + 1);
+    snprintf(numeric_overflow, sizeof(numeric_overflow), "%zu0", SIZE_MAX);
     opts = rp2p_options_default();
-    test_setenv("RP2P_SEATS", "2147483648");
+    test_setenv("RP2P_SEATS", allocation_overflow);
     rp2p_options_load_env(&opts);
-    rc += expect_int("overflow seats kept default", 0, opts.seats);
+    rc += expect_size("allocation-overflow seats kept default", 0,
+        opts.seats);
+    rp2p_options_free(&opts);
+    opts = rp2p_options_default();
+    test_setenv("RP2P_SEATS", numeric_overflow);
+    rp2p_options_load_env(&opts);
+    rc += expect_size("numeric-overflow seats kept default", 0, opts.seats);
     rp2p_options_free(&opts);
     opts = rp2p_options_default();
     test_setenv("RP2P_SEATS", "0");
     test_setenv("RP2P_POW", "0");
     test_setenv("RP2P_SWEEP", "0");
     rp2p_options_load_env(&opts);
-    rc += expect_int("zero seats accepted", 0, opts.seats);
+    rc += expect_size("zero seats accepted", 0, opts.seats);
     rc += expect_int("zero pow accepted", 0, opts.pow);
     rc += expect_int("zero sweep accepted", 0, opts.sweep);
     rp2p_options_free(&opts);
@@ -2369,23 +2396,28 @@ static int case_rp2p_serve_index(void) {
     rc += expect_true("index port closed", test_wait_port(port, 0));
 
     port = (unsigned short)(test_port_base() + 2U);
-    rc += expect_int("start one-seat index", 0,
-        test_index_start_configured(&index, port, 1, NULL, NULL));
+    rc += expect_int("start capacity-limited index", 0,
+        test_index_start_configured(&index, port, 2, NULL, NULL));
     rc += expect_int("start first capacity publisher", 0,
         test_publisher_start(&first, "capone", port,
             (unsigned short)(port + 20U)));
     rc += expect_true("first capacity publisher active",
         atomic_load(&first.result) == 999);
-    rc += expect_int("start over-capacity publisher", 0,
+    rc += expect_int("start second capacity publisher", 0,
         test_publisher_start(&second, "captwo", port,
             (unsigned short)(port + 21U)));
+    rc += expect_true("second capacity publisher active",
+        atomic_load(&second.result) == 999);
+    rc += expect_int("start over-capacity publisher", 0,
+        test_publisher_start(&third, "capthree", port,
+            (unsigned short)(port + 22U)));
     rc += expect_true("capacity reached is reported",
-        test_publisher_wait_result(&second, 2000U));
+        test_publisher_wait_result(&third, 2000U));
     rc += expect_int("capacity rejection category", RP2P_EFULL,
-        atomic_load(&second.result));
+        atomic_load(&third.result));
     rc += expect_true("capacity rejection detail",
-        strstr(rp2p_get_error(second.ctx), "full") != NULL);
-    test_publisher_finish(&second);
+        strstr(rp2p_get_error(third.ctx), "full") != NULL);
+    test_publisher_finish(&third);
     test_publisher_stop(&first);
     rc += expect_int("lookup removed disconnected publisher", 0,
         test_control_request(port,
@@ -2398,6 +2430,7 @@ static int case_rp2p_serve_index(void) {
     rc += expect_true("released capacity is reusable",
         atomic_load(&third.result) == 999);
     test_publisher_stop(&third);
+    test_publisher_stop(&second);
     test_index_stop(&index);
 
     port = (unsigned short)(test_port_base() + 3U);
@@ -2434,6 +2467,19 @@ static int case_rp2p_serve_index(void) {
     test_publisher_finish(&third);
     test_publisher_stop(&second);
     test_publisher_stop(&first);
+    test_index_stop(&index);
+
+    port = (unsigned short)(test_port_base() + 4U);
+    rc += expect_int("start zero-seat index", 0,
+        test_index_start_configured(&index, port, 0, NULL, NULL));
+    rc += expect_int("start publisher against zero-seat index", 0,
+        test_publisher_start(&first, "noseat", port,
+            (unsigned short)(port + 20U)));
+    rc += expect_true("zero seats rejects publisher",
+        test_publisher_wait_result(&first, 2000U));
+    rc += expect_int("zero-seat rejection category", RP2P_EFULL,
+        atomic_load(&first.result));
+    test_publisher_finish(&first);
     test_index_stop(&index);
     return rc == 0 ? 0 : 1;
 }
@@ -3205,19 +3251,16 @@ static int case_rp2p_get_error(void) {
 static int case_rp2p_set_seats(void) {
     rp2p_t *ctx;
     int rc;
+    size_t max_peer_count;
 
     rc = 0;
     rc += expect_int("set seats NULL", RP2P_EINVAL, rp2p_set_seats(NULL, 1));
     rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
+    max_peer_count = SIZE_MAX / sizeof(rp2p_peer_t);
+    rc += expect_int("set zero seats", RP2P_OK, rp2p_set_seats(ctx, 0));
     rc += expect_int("set seats positive", RP2P_OK, rp2p_set_seats(ctx, 2));
-    rc += expect_int("set seats above old ceiling", RP2P_OK,
-        rp2p_set_seats(ctx, 1025));
-    rc += expect_int("set platform-limit seats",
-        (size_t)INT_MAX <= SIZE_MAX / sizeof(rp2p_peer_t) ?
-            RP2P_OK : RP2P_EINVAL,
-        rp2p_set_seats(ctx, INT_MAX));
-    rc += expect_int("set seats negative", RP2P_EINVAL,
-        rp2p_set_seats(ctx, -1));
+    rc += expect_int("reject allocation count overflow", RP2P_EINVAL,
+        rp2p_set_seats(ctx, max_peer_count + 1));
     rp2p_close(ctx);
     return rc == 0 ? 0 : 1;
 }
