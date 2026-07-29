@@ -2631,7 +2631,7 @@ int redp2p_set_pow(redp2p_t *ctx, int bits) {
 }
 
 /**
- * Configures the local service or listener port used by set and con.
+ * Configures the local service or listener port used by pub and con.
  * Summary: Marks the port as explicit for precedence over arguments.
  * @param ctx  Open context.
  * @param port Local bind port.
@@ -2680,7 +2680,7 @@ int redp2p_set_sweep(redp2p_t *ctx, int sweep) {
 }
 
 /**
- * Resolves the effective local port for set or con.
+ * Resolves the effective local port for pub or con.
  * Summary: A nonzero argument overrides a default context port, while a nonzero
  * argument conflicting with an explicitly set context port is rejected.
  * @param ctx        Open context.

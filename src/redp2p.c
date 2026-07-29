@@ -1,6 +1,6 @@
 /**
  * redp2p.c - REDP2P.
- * Summary: REDP2P tunnel CLI - idx, set, del, con.
+ * Summary: REDP2P tunnel CLI - idx, pub, del, con.
  *
  * Author:  KaisarCode
  * Website: https://kaisarcode.com
@@ -242,8 +242,8 @@ static void print_help(const char *name) {
     printf("\n");
     printf("Commands:\n");
     printf("  idx <port> [--seats <N>] [--pow <N>] Start index with publisher seats\n");
-    printf("  set <host>@<index[:port]> --tcp <port> [--sweep <n>] [--stun <url>]\n");
-    printf("  set <host>@<index[:port]> --udp <port> [--sweep <n>] [--stun <url>]\n");
+    printf("  pub <host>@<index[:port]> --tcp <port> [--sweep <n>] [--stun <url>]\n");
+    printf("  pub <host>@<index[:port]> --udp <port> [--sweep <n>] [--stun <url>]\n");
     printf("  del <host>@<index[:port]> Deregister from index\n");
     printf("  con <host>@<index[:port]> --tcp <port> [--sweep <n>] [--stun <url>]\n");
     printf("  con <host>@<index[:port]> --udp <port> [--sweep <n>] [--stun <url>]\n");
@@ -251,7 +251,7 @@ static void print_help(const char *name) {
     printf("Environment:\n");
     printf("  REDP2P_SEATS              Publisher seats; VIPs count; unset means no limit\n");
     printf("  REDP2P_POW                PoW bits for index registration (0..32)\n");
-    printf("  REDP2P_PASS               Optional shared password for REGISTER/set protection\n");
+    printf("  REDP2P_PASS               Optional shared password for REGISTER/pub protection\n");
     printf("  REDP2P_VIP                Reserved seat passwords as '<id> <pass> ...'\n");
     printf("  REDP2P_SWEEP              UDP port sweep range used during punch fallback\n");
     printf("  REDP2P_STUN               Optional STUN URL (stun:host:port)\n");
@@ -261,7 +261,7 @@ static void print_help(const char *name) {
 
 /**
  * Program entry point.
- * Summary: Dispatches subcommands (idx, set, del, con).
+ * Summary: Dispatches subcommands (idx, pub, del, con).
  * @param argc Argument count.
  * @param argv Argument vector.
  * @return 0 on success, 1 on error.
@@ -362,7 +362,7 @@ int main(int argc, char **argv) {
         redp2p_options_free(&opts);
         return exit_code;
 
-    } else if (strcmp(argv[1], "set") == 0) {
+    } else if (strcmp(argv[1], "pub") == 0) {
         redp2p_options_t opts;
         char host[REDP2P_ID_MAX + 1];
         char idx_host[256];
@@ -373,7 +373,7 @@ int main(int argc, char **argv) {
         opts = redp2p_options_default();
         redp2p_options_load_env(&opts);
 
-        if (argc < 3) { fprintf(stderr, "redp2p: usage: %s set <host>@<index[:port]>\n", argv[0]); redp2p_options_free(&opts); return 1; }
+        if (argc < 3) { fprintf(stderr, "redp2p: usage: %s pub <host>@<index[:port]>\n", argv[0]); redp2p_options_free(&opts); return 1; }
         if (parse_hostspec(argv[2], host, sizeof(host), idx_host, sizeof(idx_host), &idx_port) != 0) {
             fprintf(stderr, "redp2p: invalid spec '%s' (expected host@index:port)\n", argv[2]); redp2p_options_free(&opts); return 1;
         }
@@ -420,7 +420,7 @@ int main(int argc, char **argv) {
             } else { fprintf(stderr, "redp2p: unknown option '%s'\n", argv[i]); redp2p_options_free(&opts); return 1; }
         }
 
-        if (proto == 0 || service_port == 0) { fprintf(stderr, "redp2p: set requires --tcp <port> or --udp <port>\n"); redp2p_options_free(&opts); return 1; }
+        if (proto == 0 || service_port == 0) { fprintf(stderr, "redp2p: pub requires --tcp <port> or --udp <port>\n"); redp2p_options_free(&opts); return 1; }
 
         if (redp2p_open(&ctx) != REDP2P_OK) { fprintf(stderr, "redp2p: failed to create context\n"); redp2p_options_free(&opts); return 1; }
         if (redp2p_set_pass(ctx, opts.pass) != REDP2P_OK) {
@@ -438,7 +438,7 @@ int main(int argc, char **argv) {
 
         ret = redp2p_wait(ctx, idx_host, idx_port, host, 0);
         if (ret != REDP2P_OK)
-            fprintf(stderr, "redp2p: set exited: %s\n", redp2p_strerror(ret));
+            fprintf(stderr, "redp2p: pub exited: %s\n", redp2p_strerror(ret));
 
         redp2p_close(ctx);
         redp2p_options_free(&opts);

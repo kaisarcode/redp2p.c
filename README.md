@@ -37,7 +37,7 @@ redp2p idx 9876 --pow 20
 Publish a local TCP service:
 
 ```bash
-redp2p set web@idx.example.com:9876 --tcp 8080
+redp2p pub web@idx.example.com:9876 --tcp 8080
 ```
 
 Expose the remote TCP service locally:
@@ -55,14 +55,14 @@ printf 'ping' | socat - TCP:127.0.0.1:9000
 Publish and consume a UDP service:
 
 ```bash
-redp2p set game@idx.example.com:9876 --udp 7777
+redp2p pub game@idx.example.com:9876 --udp 7777
 redp2p con game@idx.example.com:9876 --udp 9000
 ```
 
 Enable optional STUN discovery:
 
 ```bash
-redp2p set web@idx.example.com:9876 --tcp 8080 \
+redp2p pub web@idx.example.com:9876 --tcp 8080 \
   --stun stun:stun.cloudflare.com:3478
 ```
 
@@ -81,8 +81,8 @@ redp2p del web@idx.example.com:9876
 | `idx <port>`                           | Start an index server                         |
 | `idx <port> --seats <N>`               | Set total publisher seats to `N`               |
 | `idx <port> --pow <N>`                 | Set publisher registration proof-of-work cost |
-| `set <id>@<index[:port]> --tcp <port>` | Publish a local TCP service                   |
-| `set <id>@<index[:port]> --udp <port>` | Publish a local UDP service                   |
+| `pub <id>@<index[:port]> --tcp <port>` | Publish a local TCP service                   |
+| `pub <id>@<index[:port]> --udp <port>` | Publish a local UDP service                   |
 | `con <id>@<index[:port]> --tcp <port>` | Expose a remote TCP service locally           |
 | `con <id>@<index[:port]> --udp <port>` | Expose a remote UDP service locally           |
 | `del <id>@<index[:port]>`              | Remove a published service                    |

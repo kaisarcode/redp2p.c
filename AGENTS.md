@@ -90,7 +90,7 @@ The following invariants must be preserved unless the project owner explicitly i
 * the project remains usable on modest hardware
 * the code remains inspectable by one person
 
-The absence of relay, accounts, persistent identity, telemetry, and enterprise control infrastructure is intentional. The local registration key files used by `set` and `del` are a narrow operational exception, not an index database or identity system.
+The absence of relay, accounts, persistent identity, telemetry, and enterprise control infrastructure is intentional. The local registration key files used by `pub` and `del` are a narrow operational exception, not an index database or identity system.
 
 These are not missing features.
 
