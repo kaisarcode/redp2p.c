@@ -1,12 +1,12 @@
-# rp2p.c - peer-to-peer service tunneling
+# redp2p.c - peer-to-peer service tunneling
 
-`rp2p.c` is a small C library and CLI for exposing local TCP and UDP services through direct peer-to-peer tunnels.
+`redp2p.c` is a small C library and CLI for exposing local TCP and UDP services through direct peer-to-peer tunnels.
 
 A temporary TCP index coordinates registration, lookup, candidate exchange, and UDP hole punching. Application traffic travels directly between peers.
 
 TCP services are transported through vendored KCP over the direct UDP path. UDP services preserve datagram boundaries.
 
-RP2P is intended for small, independently operated systems that need direct connectivity without depending on managed cloud infrastructure, permanent hosted services, or recurring payments. Application-specific concerns such as users, authentication, authorization, encryption, persistence, and business rules remain outside the library.
+REDP2P is intended for small, independently operated systems that need direct connectivity without depending on managed cloud infrastructure, permanent hosted services, or recurring payments. Application-specific concerns such as users, authentication, authorization, encryption, persistence, and business rules remain outside the library.
 
 See `DESIGN.md` for the project motivation, architectural boundaries, and non-goals.
 
@@ -19,31 +19,31 @@ See `DESIGN.md` for the project motivation, architectural boundaries, and non-go
 Start an index server:
 
 ```bash
-rp2p idx 9876
+redp2p idx 9876
 ```
 
 Start an index with publisher seats:
 
 ```bash
-rp2p idx 9876 --seats 128
+redp2p idx 9876 --seats 128
 ```
 
 Start an index with proof-of-work registration cost:
 
 ```bash
-rp2p idx 9876 --pow 20
+redp2p idx 9876 --pow 20
 ```
 
 Publish a local TCP service:
 
 ```bash
-rp2p set web@idx.example.com:9876 --tcp 8080
+redp2p set web@idx.example.com:9876 --tcp 8080
 ```
 
 Expose the remote TCP service locally:
 
 ```bash
-rp2p con web@idx.example.com:9876 --tcp 9000
+redp2p con web@idx.example.com:9876 --tcp 9000
 ```
 
 Use the service through the local bridge:
@@ -55,21 +55,21 @@ printf 'ping' | socat - TCP:127.0.0.1:9000
 Publish and consume a UDP service:
 
 ```bash
-rp2p set game@idx.example.com:9876 --udp 7777
-rp2p con game@idx.example.com:9876 --udp 9000
+redp2p set game@idx.example.com:9876 --udp 7777
+redp2p con game@idx.example.com:9876 --udp 9000
 ```
 
 Enable optional STUN discovery:
 
 ```bash
-rp2p set web@idx.example.com:9876 --tcp 8080 \
+redp2p set web@idx.example.com:9876 --tcp 8080 \
   --stun stun:stun.cloudflare.com:3478
 ```
 
 Remove a published service from the index:
 
 ```bash
-rp2p del web@idx.example.com:9876
+redp2p del web@idx.example.com:9876
 ```
 
 ---
@@ -100,17 +100,17 @@ CLI flags override environment variables, which override built-in defaults.
 Supported environment variables:
 
 ```text
-RP2P_PASS
-RP2P_VIP
-RP2P_POW
-RP2P_SEATS
-RP2P_SWEEP
-RP2P_STUN
+REDP2P_PASS
+REDP2P_VIP
+REDP2P_POW
+REDP2P_SEATS
+REDP2P_SWEEP
+REDP2P_STUN
 ```
 
-`RP2P_PASS`, `RP2P_VIP`, and proof-of-work protect publisher registration and index capacity.
+`REDP2P_PASS`, `REDP2P_VIP`, and proof-of-work protect publisher registration and index capacity.
 
-`RP2P_SEATS=N` is equivalent to `idx --seats N`. Without either setting, the index has no publisher limit. When configured, `N` is the total number of publisher seats. Each VIP reservation occupies one seat even while that VIP is inactive; non-VIP publishers use the remaining seats. A value of `0` accepts no publishers. When both are present, `--seats` takes precedence.
+`REDP2P_SEATS=N` is equivalent to `idx --seats N`. Without either setting, the index has no publisher limit. When configured, `N` is the total number of publisher seats. Each VIP reservation occupies one seat even while that VIP is inactive; non-VIP publishers use the remaining seats. A value of `0` accepts no publishers. When both are present, `--seats` takes precedence.
 
 ---
 
@@ -119,43 +119,43 @@ RP2P_STUN
 Start an index:
 
 ```c
-#include "librp2p.h"
+#include "libredp2p.h"
 
-rp2p_t *ctx = NULL;
+redp2p_t *ctx = NULL;
 
-if (rp2p_open(&ctx) == RP2P_OK) {
-    rp2p_set_pow(ctx, 0);
-    rp2p_serve_index(ctx, "0.0.0.0", 9876);
-    rp2p_close(ctx);
+if (redp2p_open(&ctx) == REDP2P_OK) {
+    redp2p_set_pow(ctx, 0);
+    redp2p_serve_index(ctx, "0.0.0.0", 9876);
+    redp2p_close(ctx);
 }
 ```
 
 Publish a local service:
 
 ```c
-#include "librp2p.h"
+#include "libredp2p.h"
 
-rp2p_t *ctx = NULL;
+redp2p_t *ctx = NULL;
 
-if (rp2p_open(&ctx) == RP2P_OK) {
-    rp2p_set_protocol(ctx, RP2P_PROTO_TCP);
-    rp2p_set_port(ctx, 8080);
-    rp2p_wait(ctx, "idx.example.com", 9876, "web", 0);
-    rp2p_close(ctx);
+if (redp2p_open(&ctx) == REDP2P_OK) {
+    redp2p_set_protocol(ctx, REDP2P_PROTO_TCP);
+    redp2p_set_port(ctx, 8080);
+    redp2p_wait(ctx, "idx.example.com", 9876, "web", 0);
+    redp2p_close(ctx);
 }
 ```
 
 Expose a remote service locally:
 
 ```c
-#include "librp2p.h"
+#include "libredp2p.h"
 
-rp2p_t *ctx = NULL;
+redp2p_t *ctx = NULL;
 
-if (rp2p_open(&ctx) == RP2P_OK) {
-    rp2p_set_protocol(ctx, RP2P_PROTO_TCP);
-    rp2p_set_port(ctx, 9000);
-    rp2p_connect(
+if (redp2p_open(&ctx) == REDP2P_OK) {
+    redp2p_set_protocol(ctx, REDP2P_PROTO_TCP);
+    redp2p_set_port(ctx, 9000);
+    redp2p_connect(
         ctx,
         "idx.example.com",
         9876,
@@ -163,14 +163,14 @@ if (rp2p_open(&ctx) == RP2P_OK) {
         "web",
         0
     );
-    rp2p_close(ctx);
+    redp2p_close(ctx);
 }
 ```
 
 List active publishers:
 
 ```c
-#include "librp2p.h"
+#include "libredp2p.h"
 
 #include <stdio.h>
 
@@ -179,17 +179,17 @@ static void on_publisher(const char *id, void *userdata) {
     printf("%s\n", id);
 }
 
-rp2p_t *ctx = NULL;
+redp2p_t *ctx = NULL;
 
-if (rp2p_open(&ctx) == RP2P_OK) {
-    rp2p_list_publishers(
+if (redp2p_open(&ctx) == REDP2P_OK) {
+    redp2p_list_publishers(
         ctx,
         "idx.example.com",
         9876,
         on_publisher,
         NULL
     );
-    rp2p_close(ctx);
+    redp2p_close(ctx);
 }
 ```
 
@@ -197,17 +197,17 @@ if (rp2p_open(&ctx) == RP2P_OK) {
 
 ## Lifecycle
 
-* `rp2p_options_default()` returns initialized runtime options.
-* `rp2p_options_load_env()` loads supported environment values.
-* `rp2p_options_free()` releases option-owned allocations.
-* `rp2p_open()` allocates a caller-owned context.
-* `rp2p_serve_index()` runs an index server.
-* `rp2p_wait()` publishes a local service and accepts peer sessions.
-* `rp2p_connect()` exposes a remote service through a local bridge.
-* `rp2p_deregister()` removes one published service.
-* `rp2p_list_publishers()` lists active publisher IDs.
-* `rp2p_stop()` requests termination of a blocking operation.
-* `rp2p_close()` releases the context and associated resources.
+* `redp2p_options_default()` returns initialized runtime options.
+* `redp2p_options_load_env()` loads supported environment values.
+* `redp2p_options_free()` releases option-owned allocations.
+* `redp2p_open()` allocates a caller-owned context.
+* `redp2p_serve_index()` runs an index server.
+* `redp2p_wait()` publishes a local service and accepts peer sessions.
+* `redp2p_connect()` exposes a remote service through a local bridge.
+* `redp2p_deregister()` removes one published service.
+* `redp2p_list_publishers()` lists active publisher IDs.
+* `redp2p_stop()` requests termination of a blocking operation.
+* `redp2p_close()` releases the context and associated resources.
 
 See `DESIGN.md` for protocol boundaries and architectural invariants.
 
@@ -232,6 +232,8 @@ Clean and rebuild:
 ```bash
 make clean && make
 ```
+
+`make clean` removes both `.build/` and `bin/`.
 
 ### Tests
 

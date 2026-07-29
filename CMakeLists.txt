@@ -1,20 +1,20 @@
-# rp2p - RedP2P
+# redp2p - REDP2P
 # KaisarCode - CMake build configuration
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 cmake_minimum_required(VERSION 3.14)
-project(rp2p LANGUAGES C)
+project(redp2p LANGUAGES C)
 set(CMAKE_C_STANDARD 11)
 
-if(NOT DEFINED RP2P_BUILD_VERSION)
-    set(RP2P_BUILD_VERSION 0)
+if(NOT DEFINED REDP2P_BUILD_VERSION)
+    set(REDP2P_BUILD_VERSION 0)
 endif()
 
-option(RP2P_BUILD_TESTS "Build rp2p tests" OFF)
+option(REDP2P_BUILD_TESTS "Build redp2p tests" OFF)
 
-set(RP2P_TEST_EXTERNAL_ARTIFACTS OFF)
-if(RP2P_BUILD_TESTS AND RP2P_TEST_SHARED_LIBRARY)
-    set(RP2P_TEST_EXTERNAL_ARTIFACTS ON)
+set(REDP2P_TEST_EXTERNAL_ARTIFACTS OFF)
+if(REDP2P_BUILD_TESTS AND REDP2P_TEST_SHARED_LIBRARY)
+    set(REDP2P_TEST_EXTERNAL_ARTIFACTS ON)
 endif()
 
 if(NOT MSVC)
@@ -28,124 +28,148 @@ else()
 endif()
 
 # Shared library
-set(RP2P_SOURCES
-    src/librp2p.c
+set(REDP2P_SOURCES
+    src/libredp2p.c
     lib/monocypher/monocypher.c
     lib/kcp/ikcp.c
 )
 
-set_source_files_properties(src/librp2p.c PROPERTIES
-    COMPILE_DEFINITIONS RP2P_BUILD_VERSION=${RP2P_BUILD_VERSION}
+set_source_files_properties(src/libredp2p.c PROPERTIES
+    COMPILE_DEFINITIONS REDP2P_BUILD_VERSION=${REDP2P_BUILD_VERSION}
 )
 
-if(NOT RP2P_TEST_EXTERNAL_ARTIFACTS)
-    add_library(rp2p_shared SHARED ${RP2P_SOURCES})
-    set_target_properties(rp2p_shared PROPERTIES OUTPUT_NAME "rp2p")
-    target_include_directories(rp2p_shared PRIVATE src lib/monocypher lib/kcp)
+if(NOT REDP2P_TEST_EXTERNAL_ARTIFACTS)
+    add_library(redp2p_shared SHARED ${REDP2P_SOURCES})
+    set_target_properties(redp2p_shared PROPERTIES OUTPUT_NAME "redp2p")
+    target_include_directories(redp2p_shared PRIVATE src lib/monocypher lib/kcp)
 
     # Static library
-    add_library(rp2p_static STATIC ${RP2P_SOURCES})
-    set_target_properties(rp2p_static PROPERTIES OUTPUT_NAME "rp2p")
-    target_include_directories(rp2p_static PRIVATE src lib/monocypher lib/kcp)
+    add_library(redp2p_static STATIC ${REDP2P_SOURCES})
+    set_target_properties(redp2p_static PROPERTIES OUTPUT_NAME "redp2p")
+    target_include_directories(redp2p_static PRIVATE src lib/monocypher lib/kcp)
 
-    # Binary: rp2p
+    # Binary: redp2p
     if(APPLE)
-        add_executable(rp2p src/rp2p.c ${RP2P_SOURCES})
+        add_executable(redp2p src/redp2p.c ${REDP2P_SOURCES})
     else()
-        add_executable(rp2p src/rp2p.c)
-        target_link_libraries(rp2p PRIVATE rp2p_static)
+        add_executable(redp2p src/redp2p.c)
+        target_link_libraries(redp2p PRIVATE redp2p_static)
     endif()
-    target_include_directories(rp2p PRIVATE src lib/monocypher lib/kcp)
+    target_include_directories(redp2p PRIVATE src lib/monocypher lib/kcp)
 
     if(UNIX AND NOT ANDROID AND NOT APPLE)
-        target_link_libraries(rp2p_shared pthread m)
-        target_link_libraries(rp2p_static pthread m)
-        target_link_libraries(rp2p PRIVATE pthread m)
+        target_link_libraries(redp2p_shared pthread m)
+        target_link_libraries(redp2p_static pthread m)
+        target_link_libraries(redp2p PRIVATE pthread m)
     elseif(MINGW)
-        target_link_libraries(rp2p_shared ws2_32 bcrypt)
-        target_link_libraries(rp2p_static ws2_32 bcrypt)
-        target_link_libraries(rp2p PRIVATE ws2_32 bcrypt)
+        target_link_libraries(redp2p_shared ws2_32 bcrypt)
+        target_link_libraries(redp2p_static ws2_32 bcrypt)
+        target_link_libraries(redp2p PRIVATE ws2_32 bcrypt)
     elseif(MSVC)
-        target_link_libraries(rp2p_shared ws2_32 bcrypt)
-        target_link_libraries(rp2p_static ws2_32 bcrypt)
-        target_link_libraries(rp2p PRIVATE ws2_32 bcrypt)
+        target_link_libraries(redp2p_shared ws2_32 bcrypt)
+        target_link_libraries(redp2p_static ws2_32 bcrypt)
+        target_link_libraries(redp2p PRIVATE ws2_32 bcrypt)
     endif()
 endif()
 
-if(RP2P_BUILD_TESTS)
+if(REDP2P_BUILD_TESTS)
     enable_testing()
 
-    if(RP2P_TEST_SHARED_LIBRARY)
-        add_library(rp2p_test_shared SHARED IMPORTED)
-        set_target_properties(rp2p_test_shared PROPERTIES
-            IMPORTED_LOCATION "${RP2P_TEST_SHARED_LIBRARY}"
+    if(REDP2P_TEST_SHARED_LIBRARY)
+        add_library(redp2p_test_shared SHARED IMPORTED)
+        set_target_properties(redp2p_test_shared PROPERTIES
+            IMPORTED_LOCATION "${REDP2P_TEST_SHARED_LIBRARY}"
         )
-        if(RP2P_TEST_IMPORT_LIBRARY)
-            set_target_properties(rp2p_test_shared PROPERTIES
-                IMPORTED_IMPLIB "${RP2P_TEST_IMPORT_LIBRARY}"
+        if(REDP2P_TEST_IMPORT_LIBRARY)
+            set_target_properties(redp2p_test_shared PROPERTIES
+                IMPORTED_IMPLIB "${REDP2P_TEST_IMPORT_LIBRARY}"
             )
         endif()
     else()
-        set(RP2P_TEST_SHARED_TARGET rp2p_shared)
+        set(REDP2P_TEST_SHARED_TARGET redp2p_shared)
     endif()
 
-    if(TARGET rp2p_test_shared)
-        set(RP2P_TEST_SHARED_TARGET rp2p_test_shared)
+    if(TARGET redp2p_test_shared)
+        set(REDP2P_TEST_SHARED_TARGET redp2p_test_shared)
     endif()
 
-    add_executable(rp2p_contract_test src/test.c)
-    target_include_directories(rp2p_contract_test PRIVATE src)
-    target_link_libraries(rp2p_contract_test PRIVATE ${RP2P_TEST_SHARED_TARGET})
+    add_executable(redp2p_contract_test src/test.c)
+    target_include_directories(redp2p_contract_test PRIVATE src)
+    target_link_libraries(redp2p_contract_test PRIVATE ${REDP2P_TEST_SHARED_TARGET})
 
     if(UNIX AND NOT ANDROID AND NOT APPLE)
-        target_link_libraries(rp2p_contract_test PRIVATE pthread m)
+        target_link_libraries(redp2p_contract_test PRIVATE pthread m)
     elseif(MINGW)
-        target_link_libraries(rp2p_contract_test PRIVATE ws2_32 bcrypt)
+        target_link_libraries(redp2p_contract_test PRIVATE ws2_32 bcrypt)
     elseif(MSVC)
-        target_link_libraries(rp2p_contract_test PRIVATE ws2_32 bcrypt)
+        target_link_libraries(redp2p_contract_test PRIVATE ws2_32 bcrypt)
     endif()
 
-    add_custom_command(TARGET rp2p_contract_test POST_BUILD
+    add_custom_command(TARGET redp2p_contract_test POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_FILE:${RP2P_TEST_SHARED_TARGET}>
-            $<TARGET_FILE_DIR:rp2p_contract_test>
+            $<TARGET_FILE:${REDP2P_TEST_SHARED_TARGET}>
+            $<TARGET_FILE_DIR:redp2p_contract_test>
     )
 
-    add_test(NAME library-rp2p_options_default COMMAND rp2p_contract_test rp2p_options_default)
-    add_test(NAME library-rp2p_options_load_env COMMAND rp2p_contract_test rp2p_options_load_env)
-    add_test(NAME library-rp2p_options_load_env_invalid COMMAND rp2p_contract_test rp2p_options_load_env_invalid)
-    add_test(NAME library-rp2p_options_free COMMAND rp2p_contract_test rp2p_options_free)
-    add_test(NAME library-rp2p_open COMMAND rp2p_contract_test rp2p_open)
-    add_test(NAME library-rp2p_close COMMAND rp2p_contract_test rp2p_close)
-    add_test(NAME library-rp2p_stop COMMAND rp2p_contract_test rp2p_stop)
-    add_test(NAME library-rp2p_version COMMAND rp2p_contract_test rp2p_version)
-    add_test(NAME library-rp2p_strerror COMMAND rp2p_contract_test rp2p_strerror)
-    add_test(NAME library-rp2p_is_valid_id COMMAND rp2p_contract_test rp2p_is_valid_id)
-    add_test(NAME library-rp2p_is_valid_pass_token COMMAND rp2p_contract_test rp2p_is_valid_pass_token)
-    add_test(NAME library-rp2p_serve_index COMMAND rp2p_contract_test rp2p_serve_index)
-    add_test(NAME library-rp2p_wait COMMAND rp2p_contract_test rp2p_wait)
-    add_test(NAME library-rp2p_connect COMMAND rp2p_contract_test rp2p_connect)
-    add_test(NAME library-rp2p_udp_tunnel COMMAND rp2p_contract_test rp2p_udp_tunnel)
-    add_test(NAME library-rp2p_tcp_stream COMMAND rp2p_contract_test rp2p_tcp_stream)
-    add_test(NAME library-rp2p_deregister COMMAND rp2p_contract_test rp2p_deregister)
-    add_test(NAME library-rp2p_list_publishers COMMAND rp2p_contract_test rp2p_list_publishers)
-    add_test(NAME library-rp2p_get_error COMMAND rp2p_contract_test rp2p_get_error)
-    add_test(NAME library-rp2p_set_seats COMMAND rp2p_contract_test rp2p_set_seats)
-    add_test(NAME library-rp2p_set_pow COMMAND rp2p_contract_test rp2p_set_pow)
-    add_test(NAME library-rp2p_set_port COMMAND rp2p_contract_test rp2p_set_port)
-    add_test(NAME library-rp2p_set_protocol COMMAND rp2p_contract_test rp2p_set_protocol)
-    add_test(NAME library-rp2p_set_pass COMMAND rp2p_contract_test rp2p_set_pass)
-    add_test(NAME library-rp2p_set_vip COMMAND rp2p_contract_test rp2p_set_vip)
-    add_test(NAME library-rp2p_set_sweep COMMAND rp2p_contract_test rp2p_set_sweep)
-    add_test(NAME library-rp2p_set_stun_url COMMAND rp2p_contract_test rp2p_set_stun_url)
-    set_tests_properties(library-rp2p_serve_index PROPERTIES TIMEOUT 30)
-    set_tests_properties(library-rp2p_wait PROPERTIES TIMEOUT 30)
-    set_tests_properties(library-rp2p_connect PROPERTIES TIMEOUT 30)
+    if(REDP2P_TEST_CLI)
+        if(CMAKE_CROSSCOMPILING_EMULATOR)
+            set(REDP2P_TEST_CLI_COMMAND
+                ${CMAKE_CROSSCOMPILING_EMULATOR}
+                "${REDP2P_TEST_CLI}"
+            )
+        else()
+            set(REDP2P_TEST_CLI_COMMAND "${REDP2P_TEST_CLI}")
+        endif()
+    elseif(TARGET redp2p)
+        set(REDP2P_TEST_CLI_COMMAND "$<TARGET_FILE:redp2p>")
+    endif()
+
+    if(REDP2P_TEST_CLI_COMMAND)
+        add_test(NAME cli-redp2p-help COMMAND ${REDP2P_TEST_CLI_COMMAND} --help)
+        add_test(NAME cli-redp2p-version COMMAND ${REDP2P_TEST_CLI_COMMAND} --version)
+        set_tests_properties(cli-redp2p-help PROPERTIES
+            PASS_REGULAR_EXPRESSION "REDP2P_PASS"
+        )
+        set_tests_properties(cli-redp2p-version PROPERTIES
+            PASS_REGULAR_EXPRESSION "redp2p build [0-9]+"
+        )
+    endif()
+
+    add_test(NAME library-redp2p_options_default COMMAND redp2p_contract_test redp2p_options_default)
+    add_test(NAME library-redp2p_options_load_env COMMAND redp2p_contract_test redp2p_options_load_env)
+    add_test(NAME library-redp2p_options_load_env_invalid COMMAND redp2p_contract_test redp2p_options_load_env_invalid)
+    add_test(NAME library-redp2p_options_free COMMAND redp2p_contract_test redp2p_options_free)
+    add_test(NAME library-redp2p_open COMMAND redp2p_contract_test redp2p_open)
+    add_test(NAME library-redp2p_close COMMAND redp2p_contract_test redp2p_close)
+    add_test(NAME library-redp2p_stop COMMAND redp2p_contract_test redp2p_stop)
+    add_test(NAME library-redp2p_version COMMAND redp2p_contract_test redp2p_version)
+    add_test(NAME library-redp2p_strerror COMMAND redp2p_contract_test redp2p_strerror)
+    add_test(NAME library-redp2p_is_valid_id COMMAND redp2p_contract_test redp2p_is_valid_id)
+    add_test(NAME library-redp2p_is_valid_pass_token COMMAND redp2p_contract_test redp2p_is_valid_pass_token)
+    add_test(NAME library-redp2p_serve_index COMMAND redp2p_contract_test redp2p_serve_index)
+    add_test(NAME library-redp2p_wait COMMAND redp2p_contract_test redp2p_wait)
+    add_test(NAME library-redp2p_connect COMMAND redp2p_contract_test redp2p_connect)
+    add_test(NAME library-redp2p_udp_tunnel COMMAND redp2p_contract_test redp2p_udp_tunnel)
+    add_test(NAME library-redp2p_tcp_stream COMMAND redp2p_contract_test redp2p_tcp_stream)
+    add_test(NAME library-redp2p_deregister COMMAND redp2p_contract_test redp2p_deregister)
+    add_test(NAME library-redp2p_list_publishers COMMAND redp2p_contract_test redp2p_list_publishers)
+    add_test(NAME library-redp2p_get_error COMMAND redp2p_contract_test redp2p_get_error)
+    add_test(NAME library-redp2p_set_seats COMMAND redp2p_contract_test redp2p_set_seats)
+    add_test(NAME library-redp2p_set_pow COMMAND redp2p_contract_test redp2p_set_pow)
+    add_test(NAME library-redp2p_set_port COMMAND redp2p_contract_test redp2p_set_port)
+    add_test(NAME library-redp2p_set_protocol COMMAND redp2p_contract_test redp2p_set_protocol)
+    add_test(NAME library-redp2p_set_pass COMMAND redp2p_contract_test redp2p_set_pass)
+    add_test(NAME library-redp2p_set_vip COMMAND redp2p_contract_test redp2p_set_vip)
+    add_test(NAME library-redp2p_set_sweep COMMAND redp2p_contract_test redp2p_set_sweep)
+    add_test(NAME library-redp2p_set_stun_url COMMAND redp2p_contract_test redp2p_set_stun_url)
+    set_tests_properties(library-redp2p_serve_index PROPERTIES TIMEOUT 30)
+    set_tests_properties(library-redp2p_wait PROPERTIES TIMEOUT 30)
+    set_tests_properties(library-redp2p_connect PROPERTIES TIMEOUT 30)
     set_tests_properties(
-        library-rp2p_udp_tunnel
-        library-rp2p_tcp_stream
+        library-redp2p_udp_tunnel
+        library-redp2p_tcp_stream
         PROPERTIES TIMEOUT 45
     )
-    set_tests_properties(library-rp2p_deregister PROPERTIES TIMEOUT 30)
-    set_tests_properties(library-rp2p_list_publishers PROPERTIES TIMEOUT 30)
+    set_tests_properties(library-redp2p_deregister PROPERTIES TIMEOUT 30)
+    set_tests_properties(library-redp2p_list_publishers PROPERTIES TIMEOUT 30)
 endif()

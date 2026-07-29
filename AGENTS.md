@@ -2,7 +2,7 @@
 
 ## Project Context
 
-`rp2p.c` is a small, composable C library and CLI for direct peer-to-peer service tunneling.
+`redp2p.c` is a small, composable C library and CLI for direct peer-to-peer service tunneling.
 
 It is intended for independently operated, small-scale systems such as:
 
@@ -25,25 +25,25 @@ Read `README.md` for usage and `DESIGN.md` for architectural boundaries before m
 
 ## Motivation
 
-RP2P exists because small, independently operated systems are poorly served by software designed around enterprise infrastructure, managed cloud services, permanent external dependencies, and recurring payments.
+REDP2P exists because small, independently operated systems are poorly served by software designed around enterprise infrastructure, managed cloud services, permanent external dependencies, and recurring payments.
 
 The project owner is also its primary operator, integrator, and maintainer. Intended deployments are concrete and modest: neighborhood businesses, social clubs, community projects, groups of friends, personal infrastructure, small game servers, local media, kiosks, workshops, and similar systems.
 
 The index must remain simple enough to run wherever an accessible address is available, including an inexpensive VPS, a home system, a single-board computer, or a smartphone. It coordinates peers but does not carry application traffic.
 
-RP2P provides one reusable connectivity component: peer coordination and direct TCP or UDP service tunneling.
+REDP2P provides one reusable connectivity component: peer coordination and direct TCP or UDP service tunneling.
 
-Applications built on top of RP2P define their own users, authentication, authorization, encryption, persistence, discovery, data models, business rules, and trust relationships. These responsibilities vary by implementation and remain outside RP2P.
+Applications built on top of REDP2P define their own users, authentication, authorization, encryption, persistence, discovery, data models, business rules, and trust relationships. These responsibilities vary by implementation and remain outside REDP2P.
 
 Their absence is not unfinished work.
 
-Do not evaluate RP2P as a smaller version of an enterprise networking platform. Enterprise platforms, hosted control planes, relays, identity systems, telemetry, centralized administration, and generalized infrastructure already exist elsewhere.
+Do not evaluate REDP2P as a smaller version of an enterprise networking platform. Enterprise platforms, hosted control planes, relays, identity systems, telemetry, centralized administration, and generalized infrastructure already exist elsewhere.
 
-RP2P addresses a different need: software that one person can understand, deploy, operate, and maintain with limited hardware, limited money, and limited complexity.
+REDP2P addresses a different need: software that one person can understand, deploy, operate, and maintain with limited hardware, limited money, and limited complexity.
 
 When evaluating a change, ask whether it is required for direct peer coordination or transport in an existing small-scale use case. Do not add generalized functionality for hypothetical deployments or future consumers.
 
-Unrequested generalization is architectural drift. When implementation-specific functionality is needed, build or compose it outside RP2P.
+Unrequested generalization is architectural drift. When implementation-specific functionality is needed, build or compose it outside REDP2P.
 
 ## Required Mindset
 
@@ -77,9 +77,9 @@ The following invariants must be preserved unless the project owner explicitly i
 * UDP mode preserves application datagram boundaries
 * STUN remains optional
 * no TURN-style relay is implemented
-* application authentication remains outside RP2P
-* application authorization remains outside RP2P
-* application encryption remains outside RP2P
+* application authentication remains outside REDP2P
+* application authorization remains outside REDP2P
+* application encryption remains outside REDP2P
 * no global identity system is introduced
 * no user account system is introduced
 * index state remains temporary
@@ -124,17 +124,17 @@ Do not recommend or implement the following unless explicitly requested:
 * Kubernetes integration
 * enterprise observability stacks
 * automatic update infrastructure
-* splitting `src/librp2p.c` or introducing private implementation modules because of file size
+* splitting `src/libredp2p.c` or introducing private implementation modules because of file size
 
 Do not justify changes through enterprise readiness, market growth, adoption, or hypothetical future scale.
 
 ## Scope Discipline
 
-RP2P coordinates peers and transports TCP streams or UDP datagrams.
+REDP2P coordinates peers and transports TCP streams or UDP datagrams.
 
 Responsibilities belonging to transported applications must remain outside the library.
 
-Do not move the following into RP2P without explicit instruction:
+Do not move the following into REDP2P without explicit instruction:
 
 * user authentication
 * application authorization
@@ -150,7 +150,7 @@ Prefer composition with another small tool over absorbing unrelated responsibili
 
 ## Local Key State
 
-Successful publisher registration stores one index-host, index-port, and publisher-scoped deregistration key below `$HOME/.local/share/rp2p/keys/`. The key authorizes later deregistration; it does not identify a user or authenticate application traffic.
+Successful publisher registration stores one index-host, index-port, and publisher-scoped deregistration key below `$HOME/.local/share/redp2p/keys/`. The key authorizes later deregistration; it does not identify a user or authenticate application traffic.
 
 Preserve these properties:
 
@@ -173,7 +173,7 @@ Before implementing a change, determine:
 * the concrete existing problem
 * the smallest code path that solves it
 * which invariant may be affected
-* whether the problem belongs to RP2P
+* whether the problem belongs to REDP2P
 * whether existing code can be simplified instead
 * whether the change introduces hidden state
 * whether it introduces an external operational dependency
@@ -230,20 +230,20 @@ Avoid:
 
 Session and control-connection tables currently grow with active local work and are ultimately constrained by descriptors and `select()` representation rather than one fixed application-level session maximum. Do not claim every allocation has a strict static bound. Prefer explicit limits when changing these paths, and never add unbounded queues or retained history.
 
-Publisher storage grows dynamically. Without configured seats, it has no application-level publisher capacity limit. When seats is configured through `--seats`, `RP2P_SEATS`, or `rp2p_set_seats()`, treat it as the total publisher capacity. Each VIP reservation occupies one seat even while inactive, and non-VIP publishers use the remainder. Zero accepts no publishers. Keep allocation arithmetic checked without presenting implementation safety checks as product capacity limits.
+Publisher storage grows dynamically. Without configured seats, it has no application-level publisher capacity limit. When seats is configured through `--seats`, `REDP2P_SEATS`, or `redp2p_set_seats()`, treat it as the total publisher capacity. Each VIP reservation occupies one seat even while inactive, and non-VIP publishers use the remainder. Zero accepts no publishers. Keep allocation arithmetic checked without presenting implementation safety checks as product capacity limits.
 
 ## Source Layout
 
 Preserve the existing four-file `src/` layout:
 
-* `src/rp2p.c` owns CLI parsing, environment precedence, messages, and process exit behavior.
-* `src/librp2p.c` owns all reusable protocol, socket, persistence, punching, index, peer coordination, and transport behavior.
-* `src/librp2p.h` is the only library header and defines the public API, limits, result codes, and ownership contract.
+* `src/redp2p.c` owns CLI parsing, environment precedence, messages, and process exit behavior.
+* `src/libredp2p.c` owns all reusable protocol, socket, persistence, punching, index, peer coordination, and transport behavior.
+* `src/libredp2p.h` is the only library header and defines the public API, limits, result codes, and ownership contract.
 * `src/test.c` contains all project tests.
 
-The single-file implementation of `src/librp2p.c` is an intentional project-wide kclib convention, not a temporary limitation or a refactoring opportunity.
+The single-file implementation of `src/libredp2p.c` is an intentional project-wide kclib convention, not a temporary limitation or a refactoring opportunity.
 
-Do not recommend, request, or implement splitting `src/librp2p.c` merely because of its line count, number of internal responsibilities, or perceived maintainability. File size alone is not considered a defect in this project, including when the file exceeds several thousand lines.
+Do not recommend, request, or implement splitting `src/libredp2p.c` merely because of its line count, number of internal responsibilities, or perceived maintainability. File size alone is not considered a defect in this project, including when the file exceeds several thousand lines.
 
 Do not create:
 
@@ -255,7 +255,7 @@ Do not create:
 * source subdirectories for implementation concerns
 * separate files for index, peer, publisher, consumer, tunnel, transport, persistence, platform, or protocol helpers
 
-Keep internal helpers `static` inside `src/librp2p.c`.
+Keep internal helpers `static` inside `src/libredp2p.c`.
 
 Organize the implementation using clear sections, concrete functions, explicit ownership, and local static helpers rather than additional compilation units.
 
@@ -308,7 +308,7 @@ Focus on:
 * cleanup after failed punching
 * KCP session separation
 
-Do not treat bundling application encryption or identity into RP2P as the default security solution.
+Do not treat bundling application encryption or identity into REDP2P as the default security solution.
 
 The correct security fix may be stricter validation, clearer trust boundaries, or documentation.
 
@@ -397,6 +397,6 @@ A task is complete when:
 * documentation matches actual behavior
 * no unrelated platform or enterprise architecture was introduced
 
-The goal is not to make RP2P larger.
+The goal is not to make REDP2P larger.
 
 The goal is to keep it useful, direct, bounded, understandable, portable, and locally operable.

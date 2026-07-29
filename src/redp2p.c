@@ -1,6 +1,6 @@
 /**
- * rp2p.c - RedP2P.
- * Summary: RP2P tunnel CLI - idx, set, del, con.
+ * redp2p.c - REDP2P.
+ * Summary: REDP2P tunnel CLI - idx, set, del, con.
  *
  * Author:  KaisarCode
  * Website: https://kaisarcode.com
@@ -11,7 +11,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 
-#include "librp2p.h"
+#include "libredp2p.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -99,7 +99,7 @@ static int parse_addr(const char *text, char *host, size_t host_sz,
     size_t n;
 
     if (!text || !text[0] || !host || host_sz == 0 || !port) return 1;
-    *port = RP2P_PORT_DEFAULT;
+    *port = REDP2P_PORT_DEFAULT;
     if (text[0] == '[') {
         end_bracket = strchr(text, ']');
         if (!end_bracket) return 1;
@@ -162,7 +162,7 @@ static int parse_hostspec(const char *spec, char *hostname, size_t hn_sz,
     memcpy(hostname, spec, n);
     hostname[n] = '\0';
 
-    *idx_port = RP2P_PORT_DEFAULT;
+    *idx_port = REDP2P_PORT_DEFAULT;
     return parse_addr(at + 1, idx_addr, ia_sz, idx_port);
 }
 
@@ -197,32 +197,32 @@ static int parse_int(const char *text, long min, long max, long *out) {
 /**
  * Loads only index-owned environment configuration.
  * @param opts Index options to populate.
- * @param seats_set Set when RP2P_SEATS contains a valid value.
+ * @param seats_set Set when REDP2P_SEATS contains a valid value.
  * @return 0 on success, 1 on allocation failure.
  */
-static int load_index_options(rp2p_options_t *opts, int *seats_set) {
+static int load_index_options(redp2p_options_t *opts, int *seats_set) {
     const char *value;
     long number;
     size_t seats;
     size_t len;
 
-    value = getenv("RP2P_SEATS");
+    value = getenv("REDP2P_SEATS");
     if (value) {
         if (parse_size(value, &seats) != 0 ||
-            seats > SIZE_MAX / sizeof(rp2p_peer_t))
+            seats > SIZE_MAX / sizeof(redp2p_peer_t))
             return 1;
         opts->seats = seats;
         *seats_set = 1;
     }
-    value = getenv("RP2P_POW");
+    value = getenv("REDP2P_POW");
     if (parse_decimal(value, 0, 32, &number) == 0)
         opts->pow = (int)number;
-    value = getenv("RP2P_PASS");
+    value = getenv("REDP2P_PASS");
     if (value) {
-        strncpy(opts->pass, value, RP2P_PASS_MAX);
-        opts->pass[RP2P_PASS_MAX] = '\0';
+        strncpy(opts->pass, value, REDP2P_PASS_MAX);
+        opts->pass[REDP2P_PASS_MAX] = '\0';
     }
-    value = getenv("RP2P_VIP");
+    value = getenv("REDP2P_VIP");
     if (!value) return 0;
     len = strlen(value);
     opts->vip = (char *)malloc(len + 1);
@@ -249,12 +249,12 @@ static void print_help(const char *name) {
     printf("  con <host>@<index[:port]> --udp <port> [--sweep <n>] [--stun <url>]\n");
     printf("\n");
     printf("Environment:\n");
-    printf("  RP2P_SEATS              Publisher seats; VIPs count; unset means no limit\n");
-    printf("  RP2P_POW                PoW bits for index registration (0..32)\n");
-    printf("  RP2P_PASS               Optional shared password for REGISTER/set protection\n");
-    printf("  RP2P_VIP                Reserved seat passwords as '<id> <pass> ...'\n");
-    printf("  RP2P_SWEEP              UDP port sweep range used during punch fallback\n");
-    printf("  RP2P_STUN               Optional STUN URL (stun:host:port)\n");
+    printf("  REDP2P_SEATS              Publisher seats; VIPs count; unset means no limit\n");
+    printf("  REDP2P_POW                PoW bits for index registration (0..32)\n");
+    printf("  REDP2P_PASS               Optional shared password for REGISTER/set protection\n");
+    printf("  REDP2P_VIP                Reserved seat passwords as '<id> <pass> ...'\n");
+    printf("  REDP2P_SWEEP              UDP port sweep range used during punch fallback\n");
+    printf("  REDP2P_STUN               Optional STUN URL (stun:host:port)\n");
     printf("  IDs may use only A-Z a-z 0-9\n");
     printf("  Passwords may use A-Z a-z 0-9 . _ - + = , : @ %% /\n");
 }
@@ -267,19 +267,19 @@ static void print_help(const char *name) {
  * @return 0 on success, 1 on error.
  */
 int main(int argc, char **argv) {
-    rp2p_t *ctx;
+    redp2p_t *ctx;
     int ret;
 
     if (argc < 2) { print_help(argv[0]); return 1; }
     if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) { print_help(argv[0]); return 0; }
     if (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--version") == 0) {
-        printf("rp2p build %llu\n",
-            (unsigned long long)rp2p_version());
+        printf("redp2p build %llu\n",
+            (unsigned long long)redp2p_version());
         return 0;
     }
 
     if (strcmp(argv[1], "idx") == 0) {
-        rp2p_options_t opts;
+        redp2p_options_t opts;
         unsigned short port;
         char vip_err[256];
         size_t seats;
@@ -287,267 +287,267 @@ int main(int argc, char **argv) {
         int pow_bits;
         int exit_code;
 
-        opts = rp2p_options_default();
+        opts = redp2p_options_default();
         seats_set = 0;
         if (load_index_options(&opts, &seats_set) != 0) {
-            fprintf(stderr, "rp2p: failed to load index options\n");
+            fprintf(stderr, "redp2p: failed to load index options\n");
             return 1;
         }
         seats = opts.seats;
         pow_bits = opts.pow;
 
         if (argc < 3) {
-            fprintf(stderr, "rp2p: usage: %s idx <port>\n", argv[0]);
-            rp2p_options_free(&opts);
+            fprintf(stderr, "redp2p: usage: %s idx <port>\n", argv[0]);
+            redp2p_options_free(&opts);
             return 1;
         }
         if (parse_port(argv[2], &port) != 0) {
-            fprintf(stderr, "rp2p: invalid port '%s'\n", argv[2]);
-            rp2p_options_free(&opts);
+            fprintf(stderr, "redp2p: invalid port '%s'\n", argv[2]);
+            redp2p_options_free(&opts);
             return 1;
         }
 
         for (int i = 3; i < argc; i++) {
             if (strcmp(argv[i], "--seats") == 0) {
-                if (i + 1 >= argc) { fprintf(stderr, "rp2p: --seats requires an argument\n"); rp2p_options_free(&opts); return 1; }
+                if (i + 1 >= argc) { fprintf(stderr, "redp2p: --seats requires an argument\n"); redp2p_options_free(&opts); return 1; }
                 if (parse_size(argv[++i], &seats) != 0) {
-                    fprintf(stderr, "rp2p: invalid --seats '%s'\n", argv[i]);
-                    rp2p_options_free(&opts);
+                    fprintf(stderr, "redp2p: invalid --seats '%s'\n", argv[i]);
+                    redp2p_options_free(&opts);
                     return 1;
                 }
                 seats_set = 1;
             } else if (strcmp(argv[i], "--pow") == 0) {
                 long v;
-                if (i + 1 >= argc) { fprintf(stderr, "rp2p: --pow requires an argument\n"); rp2p_options_free(&opts); return 1; }
+                if (i + 1 >= argc) { fprintf(stderr, "redp2p: --pow requires an argument\n"); redp2p_options_free(&opts); return 1; }
                 if (parse_int(argv[++i], 0, 32, &v) != 0) {
-                    fprintf(stderr, "rp2p: invalid --pow '%s'\n", argv[i]);
-                    rp2p_options_free(&opts);
+                    fprintf(stderr, "redp2p: invalid --pow '%s'\n", argv[i]);
+                    redp2p_options_free(&opts);
                     return 1;
                 }
                 pow_bits = (int)v;
-            } else { fprintf(stderr, "rp2p: unknown option '%s'\n", argv[i]); rp2p_options_free(&opts); return 1; }
+            } else { fprintf(stderr, "redp2p: unknown option '%s'\n", argv[i]); redp2p_options_free(&opts); return 1; }
         }
 
-        if (rp2p_open(&ctx) != RP2P_OK) {
-            fprintf(stderr, "rp2p: failed to create context\n");
-            rp2p_options_free(&opts);
+        if (redp2p_open(&ctx) != REDP2P_OK) {
+            fprintf(stderr, "redp2p: failed to create context\n");
+            redp2p_options_free(&opts);
             return 1;
         }
-        if (rp2p_set_pass(ctx, opts.pass) != RP2P_OK) {
-            fprintf(stderr, "rp2p: invalid RP2P_PASS characters\n");
-            rp2p_close(ctx);
-            rp2p_options_free(&opts);
+        if (redp2p_set_pass(ctx, opts.pass) != REDP2P_OK) {
+            fprintf(stderr, "redp2p: invalid REDP2P_PASS characters\n");
+            redp2p_close(ctx);
+            redp2p_options_free(&opts);
             return 1;
         }
-        if (seats_set && rp2p_set_seats(ctx, seats) != RP2P_OK) {
-            fprintf(stderr, "rp2p: invalid publisher capacity: %s\n",
-                rp2p_get_error(ctx));
-            rp2p_close(ctx);
-            rp2p_options_free(&opts);
+        if (seats_set && redp2p_set_seats(ctx, seats) != REDP2P_OK) {
+            fprintf(stderr, "redp2p: invalid publisher capacity: %s\n",
+                redp2p_get_error(ctx));
+            redp2p_close(ctx);
+            redp2p_options_free(&opts);
             return 1;
         }
-        rp2p_set_pow(ctx, pow_bits);
+        redp2p_set_pow(ctx, pow_bits);
         vip_err[0] = '\0';
-        if (rp2p_set_vip(ctx, opts.vip, vip_err, sizeof(vip_err)) != RP2P_OK) {
-            fprintf(stderr, "rp2p: %s\n", vip_err[0] ? vip_err : "invalid RP2P_VIP");
-            rp2p_close(ctx);
-            rp2p_options_free(&opts);
+        if (redp2p_set_vip(ctx, opts.vip, vip_err, sizeof(vip_err)) != REDP2P_OK) {
+            fprintf(stderr, "redp2p: %s\n", vip_err[0] ? vip_err : "invalid REDP2P_VIP");
+            redp2p_close(ctx);
+            redp2p_options_free(&opts);
             return 1;
         }
 
-        ret = rp2p_serve_index(ctx, NULL, port);
-        fprintf(stderr, "rp2p: index exited: %s\n", rp2p_strerror(ret));
-        exit_code = ret == RP2P_OK ? 0 : 1;
-        rp2p_close(ctx);
-        rp2p_options_free(&opts);
+        ret = redp2p_serve_index(ctx, NULL, port);
+        fprintf(stderr, "redp2p: index exited: %s\n", redp2p_strerror(ret));
+        exit_code = ret == REDP2P_OK ? 0 : 1;
+        redp2p_close(ctx);
+        redp2p_options_free(&opts);
         return exit_code;
 
     } else if (strcmp(argv[1], "set") == 0) {
-        rp2p_options_t opts;
-        char host[RP2P_ID_MAX + 1];
+        redp2p_options_t opts;
+        char host[REDP2P_ID_MAX + 1];
         char idx_host[256];
         unsigned short idx_port;
         unsigned short service_port = 0;
         int proto = 0;
 
-        opts = rp2p_options_default();
-        rp2p_options_load_env(&opts);
+        opts = redp2p_options_default();
+        redp2p_options_load_env(&opts);
 
-        if (argc < 3) { fprintf(stderr, "rp2p: usage: %s set <host>@<index[:port]>\n", argv[0]); rp2p_options_free(&opts); return 1; }
+        if (argc < 3) { fprintf(stderr, "redp2p: usage: %s set <host>@<index[:port]>\n", argv[0]); redp2p_options_free(&opts); return 1; }
         if (parse_hostspec(argv[2], host, sizeof(host), idx_host, sizeof(idx_host), &idx_port) != 0) {
-            fprintf(stderr, "rp2p: invalid spec '%s' (expected host@index:port)\n", argv[2]); rp2p_options_free(&opts); return 1;
+            fprintf(stderr, "redp2p: invalid spec '%s' (expected host@index:port)\n", argv[2]); redp2p_options_free(&opts); return 1;
         }
-        if (!rp2p_is_valid_id(host)) {
-            fprintf(stderr, "rp2p: invalid host id '%s'\n", host);
-            rp2p_options_free(&opts);
+        if (!redp2p_is_valid_id(host)) {
+            fprintf(stderr, "redp2p: invalid host id '%s'\n", host);
+            redp2p_options_free(&opts);
             return 1;
         }
 
         for (int i = 3; i < argc; i++) {
             if (strcmp(argv[i], "--tcp") == 0) {
-                if (proto != 0) { fprintf(stderr, "rp2p: choose only one of --tcp or --udp\n"); rp2p_options_free(&opts); return 1; }
-                if (i + 1 >= argc) { fprintf(stderr, "rp2p: --tcp requires a port\n"); rp2p_options_free(&opts); return 1; }
+                if (proto != 0) { fprintf(stderr, "redp2p: choose only one of --tcp or --udp\n"); redp2p_options_free(&opts); return 1; }
+                if (i + 1 >= argc) { fprintf(stderr, "redp2p: --tcp requires a port\n"); redp2p_options_free(&opts); return 1; }
                 if (parse_port(argv[i + 1], &service_port) != 0) {
-                    fprintf(stderr, "rp2p: invalid --tcp port '%s'\n", argv[i + 1]);
-                    rp2p_options_free(&opts);
+                    fprintf(stderr, "redp2p: invalid --tcp port '%s'\n", argv[i + 1]);
+                    redp2p_options_free(&opts);
                     return 1;
                 }
                 i++;
-                proto = RP2P_PROTO_TCP;
+                proto = REDP2P_PROTO_TCP;
             } else if (strcmp(argv[i], "--udp") == 0) {
-                if (proto != 0) { fprintf(stderr, "rp2p: choose only one of --tcp or --udp\n"); rp2p_options_free(&opts); return 1; }
-                if (i + 1 >= argc) { fprintf(stderr, "rp2p: --udp requires a port\n"); rp2p_options_free(&opts); return 1; }
+                if (proto != 0) { fprintf(stderr, "redp2p: choose only one of --tcp or --udp\n"); redp2p_options_free(&opts); return 1; }
+                if (i + 1 >= argc) { fprintf(stderr, "redp2p: --udp requires a port\n"); redp2p_options_free(&opts); return 1; }
                 if (parse_port(argv[i + 1], &service_port) != 0) {
-                    fprintf(stderr, "rp2p: invalid --udp port '%s'\n", argv[i + 1]);
-                    rp2p_options_free(&opts);
+                    fprintf(stderr, "redp2p: invalid --udp port '%s'\n", argv[i + 1]);
+                    redp2p_options_free(&opts);
                     return 1;
                 }
                 i++;
-                proto = RP2P_PROTO_UDP;
+                proto = REDP2P_PROTO_UDP;
             } else if (strcmp(argv[i], "--sweep") == 0) {
                 long v;
-                if (i + 1 >= argc) { fprintf(stderr, "rp2p: --sweep requires a number\n"); rp2p_options_free(&opts); return 1; }
+                if (i + 1 >= argc) { fprintf(stderr, "redp2p: --sweep requires a number\n"); redp2p_options_free(&opts); return 1; }
                 if (parse_int(argv[++i], 0, 1024, &v) != 0) {
-                    fprintf(stderr, "rp2p: invalid --sweep '%s'\n", argv[i]);
-                    rp2p_options_free(&opts);
+                    fprintf(stderr, "redp2p: invalid --sweep '%s'\n", argv[i]);
+                    redp2p_options_free(&opts);
                     return 1;
                 }
                 opts.sweep = (int)v;
             } else if (strcmp(argv[i], "--stun") == 0) {
-                if (i + 1 >= argc) { fprintf(stderr, "rp2p: --stun requires a URL\n"); rp2p_options_free(&opts); return 1; }
+                if (i + 1 >= argc) { fprintf(stderr, "redp2p: --stun requires a URL\n"); redp2p_options_free(&opts); return 1; }
                 strncpy(opts.stun_url, argv[++i], sizeof(opts.stun_url) - 1);
                 opts.stun_url[sizeof(opts.stun_url) - 1] = '\0';
-            } else { fprintf(stderr, "rp2p: unknown option '%s'\n", argv[i]); rp2p_options_free(&opts); return 1; }
+            } else { fprintf(stderr, "redp2p: unknown option '%s'\n", argv[i]); redp2p_options_free(&opts); return 1; }
         }
 
-        if (proto == 0 || service_port == 0) { fprintf(stderr, "rp2p: set requires --tcp <port> or --udp <port>\n"); rp2p_options_free(&opts); return 1; }
+        if (proto == 0 || service_port == 0) { fprintf(stderr, "redp2p: set requires --tcp <port> or --udp <port>\n"); redp2p_options_free(&opts); return 1; }
 
-        if (rp2p_open(&ctx) != RP2P_OK) { fprintf(stderr, "rp2p: failed to create context\n"); rp2p_options_free(&opts); return 1; }
-        if (rp2p_set_pass(ctx, opts.pass) != RP2P_OK) {
-            fprintf(stderr, "rp2p: invalid RP2P_PASS characters\n");
-            rp2p_close(ctx);
-            rp2p_options_free(&opts);
+        if (redp2p_open(&ctx) != REDP2P_OK) { fprintf(stderr, "redp2p: failed to create context\n"); redp2p_options_free(&opts); return 1; }
+        if (redp2p_set_pass(ctx, opts.pass) != REDP2P_OK) {
+            fprintf(stderr, "redp2p: invalid REDP2P_PASS characters\n");
+            redp2p_close(ctx);
+            redp2p_options_free(&opts);
             return 1;
         }
-        rp2p_set_protocol(ctx, proto);
-        rp2p_set_port(ctx, service_port);
-        rp2p_set_sweep(ctx, opts.sweep);
-        rp2p_set_stun_url(ctx, opts.stun_url[0] ? opts.stun_url : NULL);
+        redp2p_set_protocol(ctx, proto);
+        redp2p_set_port(ctx, service_port);
+        redp2p_set_sweep(ctx, opts.sweep);
+        redp2p_set_stun_url(ctx, opts.stun_url[0] ? opts.stun_url : NULL);
 
-        fprintf(stderr, "rp2p: waiting for connections...\n");
+        fprintf(stderr, "redp2p: waiting for connections...\n");
 
-        ret = rp2p_wait(ctx, idx_host, idx_port, host, 0);
-        if (ret != RP2P_OK)
-            fprintf(stderr, "rp2p: set exited: %s\n", rp2p_strerror(ret));
+        ret = redp2p_wait(ctx, idx_host, idx_port, host, 0);
+        if (ret != REDP2P_OK)
+            fprintf(stderr, "redp2p: set exited: %s\n", redp2p_strerror(ret));
 
-        rp2p_close(ctx);
-        rp2p_options_free(&opts);
-        return ret == RP2P_OK ? 0 : 1;
+        redp2p_close(ctx);
+        redp2p_options_free(&opts);
+        return ret == REDP2P_OK ? 0 : 1;
 
     } else if (strcmp(argv[1], "del") == 0) {
-        char host[RP2P_ID_MAX + 1];
+        char host[REDP2P_ID_MAX + 1];
         char idx_host[256];
         unsigned short idx_port;
 
-        if (argc < 3) { fprintf(stderr, "rp2p: usage: %s del <host>@<index[:port]>\n", argv[0]); return 1; }
+        if (argc < 3) { fprintf(stderr, "redp2p: usage: %s del <host>@<index[:port]>\n", argv[0]); return 1; }
         if (parse_hostspec(argv[2], host, sizeof(host), idx_host, sizeof(idx_host), &idx_port) != 0) {
-            fprintf(stderr, "rp2p: invalid spec '%s' (expected host@index:port)\n", argv[2]); return 1;
+            fprintf(stderr, "redp2p: invalid spec '%s' (expected host@index:port)\n", argv[2]); return 1;
         }
-        if (!rp2p_is_valid_id(host)) {
-            fprintf(stderr, "rp2p: invalid host id '%s'\n", host);
+        if (!redp2p_is_valid_id(host)) {
+            fprintf(stderr, "redp2p: invalid host id '%s'\n", host);
             return 1;
         }
 
-        if (rp2p_open(&ctx) != RP2P_OK) { fprintf(stderr, "rp2p: failed to create context\n"); return 1; }
-        ret = rp2p_deregister(ctx, idx_host, idx_port, host);
-        if (ret != RP2P_OK) {
-            fprintf(stderr, "rp2p: deregister failed: %s\n", rp2p_strerror(ret));
-            rp2p_close(ctx);
+        if (redp2p_open(&ctx) != REDP2P_OK) { fprintf(stderr, "redp2p: failed to create context\n"); return 1; }
+        ret = redp2p_deregister(ctx, idx_host, idx_port, host);
+        if (ret != REDP2P_OK) {
+            fprintf(stderr, "redp2p: deregister failed: %s\n", redp2p_strerror(ret));
+            redp2p_close(ctx);
             return 1;
         }
-        rp2p_close(ctx);
+        redp2p_close(ctx);
         return 0;
 
     } else if (strcmp(argv[1], "con") == 0) {
-        rp2p_options_t opts;
-        char host[RP2P_ID_MAX + 1];
+        redp2p_options_t opts;
+        char host[REDP2P_ID_MAX + 1];
         char idx_host[256];
         unsigned short idx_port;
         unsigned short listen_port = 0;
         char self_id[32];
         int proto = 0;
 
-        opts = rp2p_options_default();
-        rp2p_options_load_env(&opts);
+        opts = redp2p_options_default();
+        redp2p_options_load_env(&opts);
 
-        if (argc < 3) { fprintf(stderr, "rp2p: usage: %s con <host>@<index[:port]>\n", argv[0]); rp2p_options_free(&opts); return 1; }
+        if (argc < 3) { fprintf(stderr, "redp2p: usage: %s con <host>@<index[:port]>\n", argv[0]); redp2p_options_free(&opts); return 1; }
         if (parse_hostspec(argv[2], host, sizeof(host), idx_host, sizeof(idx_host), &idx_port) != 0) {
-            fprintf(stderr, "rp2p: invalid spec '%s' (expected host@index:port)\n", argv[2]); rp2p_options_free(&opts); return 1;
+            fprintf(stderr, "redp2p: invalid spec '%s' (expected host@index:port)\n", argv[2]); redp2p_options_free(&opts); return 1;
         }
-        if (!rp2p_is_valid_id(host)) {
-            fprintf(stderr, "rp2p: invalid host id '%s'\n", host);
-            rp2p_options_free(&opts);
+        if (!redp2p_is_valid_id(host)) {
+            fprintf(stderr, "redp2p: invalid host id '%s'\n", host);
+            redp2p_options_free(&opts);
             return 1;
         }
 
         for (int i = 3; i < argc; i++) {
             if (strcmp(argv[i], "--tcp") == 0) {
-                if (proto != 0) { fprintf(stderr, "rp2p: choose only one of --tcp or --udp\n"); rp2p_options_free(&opts); return 1; }
-                if (i + 1 >= argc) { fprintf(stderr, "rp2p: --tcp requires a port\n"); rp2p_options_free(&opts); return 1; }
+                if (proto != 0) { fprintf(stderr, "redp2p: choose only one of --tcp or --udp\n"); redp2p_options_free(&opts); return 1; }
+                if (i + 1 >= argc) { fprintf(stderr, "redp2p: --tcp requires a port\n"); redp2p_options_free(&opts); return 1; }
                 if (parse_port(argv[i + 1], &listen_port) != 0) {
-                    fprintf(stderr, "rp2p: invalid --tcp port '%s'\n", argv[i + 1]);
-                    rp2p_options_free(&opts);
+                    fprintf(stderr, "redp2p: invalid --tcp port '%s'\n", argv[i + 1]);
+                    redp2p_options_free(&opts);
                     return 1;
                 }
                 i++;
-                proto = RP2P_PROTO_TCP;
+                proto = REDP2P_PROTO_TCP;
             } else if (strcmp(argv[i], "--udp") == 0) {
-                if (proto != 0) { fprintf(stderr, "rp2p: choose only one of --tcp or --udp\n"); rp2p_options_free(&opts); return 1; }
-                if (i + 1 >= argc) { fprintf(stderr, "rp2p: --udp requires a port\n"); rp2p_options_free(&opts); return 1; }
+                if (proto != 0) { fprintf(stderr, "redp2p: choose only one of --tcp or --udp\n"); redp2p_options_free(&opts); return 1; }
+                if (i + 1 >= argc) { fprintf(stderr, "redp2p: --udp requires a port\n"); redp2p_options_free(&opts); return 1; }
                 if (parse_port(argv[i + 1], &listen_port) != 0) {
-                    fprintf(stderr, "rp2p: invalid --udp port '%s'\n", argv[i + 1]);
-                    rp2p_options_free(&opts);
+                    fprintf(stderr, "redp2p: invalid --udp port '%s'\n", argv[i + 1]);
+                    redp2p_options_free(&opts);
                     return 1;
                 }
                 i++;
-                proto = RP2P_PROTO_UDP;
+                proto = REDP2P_PROTO_UDP;
             } else if (strcmp(argv[i], "--sweep") == 0) {
                 long v;
-                if (i + 1 >= argc) { fprintf(stderr, "rp2p: --sweep requires a number\n"); rp2p_options_free(&opts); return 1; }
+                if (i + 1 >= argc) { fprintf(stderr, "redp2p: --sweep requires a number\n"); redp2p_options_free(&opts); return 1; }
                 if (parse_int(argv[++i], 0, 1024, &v) != 0) {
-                    fprintf(stderr, "rp2p: invalid --sweep '%s'\n", argv[i]);
-                    rp2p_options_free(&opts);
+                    fprintf(stderr, "redp2p: invalid --sweep '%s'\n", argv[i]);
+                    redp2p_options_free(&opts);
                     return 1;
                 }
                 opts.sweep = (int)v;
             } else if (strcmp(argv[i], "--stun") == 0) {
-                if (i + 1 >= argc) { fprintf(stderr, "rp2p: --stun requires a URL\n"); rp2p_options_free(&opts); return 1; }
+                if (i + 1 >= argc) { fprintf(stderr, "redp2p: --stun requires a URL\n"); redp2p_options_free(&opts); return 1; }
                 strncpy(opts.stun_url, argv[++i], sizeof(opts.stun_url) - 1);
                 opts.stun_url[sizeof(opts.stun_url) - 1] = '\0';
-            } else { fprintf(stderr, "rp2p: unknown option '%s'\n", argv[i]); rp2p_options_free(&opts); return 1; }
+            } else { fprintf(stderr, "redp2p: unknown option '%s'\n", argv[i]); redp2p_options_free(&opts); return 1; }
         }
 
-        if (proto == 0 || listen_port == 0) { fprintf(stderr, "rp2p: con requires --tcp <port> or --udp <port>\n"); rp2p_options_free(&opts); return 1; }
+        if (proto == 0 || listen_port == 0) { fprintf(stderr, "redp2p: con requires --tcp <port> or --udp <port>\n"); redp2p_options_free(&opts); return 1; }
 
         snprintf(self_id, sizeof(self_id), "c%d", (int)getpid());
 
-        if (rp2p_open(&ctx) != RP2P_OK) { fprintf(stderr, "rp2p: failed to create context\n"); rp2p_options_free(&opts); return 1; }
-        rp2p_set_protocol(ctx, proto);
-        rp2p_set_port(ctx, listen_port);
-        rp2p_set_sweep(ctx, opts.sweep);
-        rp2p_set_stun_url(ctx, opts.stun_url[0] ? opts.stun_url : NULL);
+        if (redp2p_open(&ctx) != REDP2P_OK) { fprintf(stderr, "redp2p: failed to create context\n"); redp2p_options_free(&opts); return 1; }
+        redp2p_set_protocol(ctx, proto);
+        redp2p_set_port(ctx, listen_port);
+        redp2p_set_sweep(ctx, opts.sweep);
+        redp2p_set_stun_url(ctx, opts.stun_url[0] ? opts.stun_url : NULL);
 
-        ret = rp2p_connect(ctx, idx_host, idx_port, self_id, host, 0);
-        if (ret != RP2P_OK)
-            fprintf(stderr, "rp2p: connect failed: %s\n", rp2p_strerror(ret));
+        ret = redp2p_connect(ctx, idx_host, idx_port, self_id, host, 0);
+        if (ret != REDP2P_OK)
+            fprintf(stderr, "redp2p: connect failed: %s\n", redp2p_strerror(ret));
 
-        rp2p_close(ctx);
-        rp2p_options_free(&opts);
-        return ret == RP2P_OK ? 0 : 1;
+        redp2p_close(ctx);
+        redp2p_options_free(&opts);
+        return ret == REDP2P_OK ? 0 : 1;
 
     } else {
-        fprintf(stderr, "rp2p: unknown command '%s'\n", argv[1]);
-        fprintf(stderr, "rp2p: try '%s --help'\n", argv[0]);
+        fprintf(stderr, "redp2p: unknown command '%s'\n", argv[1]);
+        fprintf(stderr, "redp2p: try '%s --help'\n", argv[0]);
         return 1;
     }
 }

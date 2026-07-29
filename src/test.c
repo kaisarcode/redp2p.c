@@ -1,5 +1,5 @@
 /**
- * rp2p.c - librp2p public API contract tests.
+ * redp2p.c - libredp2p public API contract tests.
  * Summary: Validates each exported function through one dedicated test case.
  *
  * Author:  KaisarCode
@@ -11,7 +11,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 
-#include "librp2p.h"
+#include "libredp2p.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,14 +52,14 @@ typedef socklen_t test_socklen_t;
 #endif
 
 typedef struct {
-    rp2p_t *ctx;
+    redp2p_t *ctx;
     unsigned short port;
     int result;
     test_thread_t thread;
 } test_index_t;
 
 typedef struct {
-    rp2p_t *ctx;
+    redp2p_t *ctx;
     const char *host;
     unsigned short index_port;
     const char *id;
@@ -71,7 +71,7 @@ typedef struct {
 } test_publisher_t;
 
 typedef struct {
-    rp2p_t *ctx;
+    redp2p_t *ctx;
     const char *host;
     unsigned short index_port;
     const char *self_id;
@@ -104,7 +104,7 @@ typedef struct {
 } test_control_stub_t;
 
 typedef struct {
-    char ids[8][RP2P_ID_MAX + 1];
+    char ids[8][REDP2P_ID_MAX + 1];
     size_t count;
 } test_publishers_t;
 
@@ -129,24 +129,24 @@ static void test_port_requirement(unsigned int offset, int *tcp, int *udp) {
 
     *tcp = 0;
     *udp = 0;
-    if (strcmp(test_case_name, "rp2p_serve_index") == 0) {
+    if (strcmp(test_case_name, "redp2p_serve_index") == 0) {
         *tcp = offset >= 1U && offset <= 4U;
-    } else if (strcmp(test_case_name, "rp2p_wait") == 0) {
+    } else if (strcmp(test_case_name, "redp2p_wait") == 0) {
         *tcp = offset == 20U || offset == 22U;
-    } else if (strcmp(test_case_name, "rp2p_connect") == 0) {
+    } else if (strcmp(test_case_name, "redp2p_connect") == 0) {
         *tcp = offset >= 40U && offset <= 45U;
         if (offset == 47U) *tcp = 1;
-    } else if (strcmp(test_case_name, "rp2p_udp_tunnel") == 0) {
+    } else if (strcmp(test_case_name, "redp2p_udp_tunnel") == 0) {
         anchor = 300U;
         *tcp = offset == anchor;
         *udp = offset == anchor + 1U || offset == anchor + 2U;
-    } else if (strcmp(test_case_name, "rp2p_tcp_stream") == 0)
+    } else if (strcmp(test_case_name, "redp2p_tcp_stream") == 0)
     {
         anchor = 400U;
         *tcp = offset >= anchor && offset <= anchor + 2U;
-    } else if (strcmp(test_case_name, "rp2p_deregister") == 0) {
+    } else if (strcmp(test_case_name, "redp2p_deregister") == 0) {
         *tcp = offset >= 60U && offset <= 62U;
-    } else if (strcmp(test_case_name, "rp2p_list_publishers") == 0) {
+    } else if (strcmp(test_case_name, "redp2p_list_publishers") == 0) {
         *tcp = offset >= 80U && offset <= 84U;
     }
 }
@@ -214,7 +214,7 @@ static int test_port_base_reserve(unsigned short base) {
     root_len = GetTempPathA(sizeof(root), root);
     if (root_len == 0 || root_len >= sizeof(root)) return 0;
     length = snprintf(test_port_reservation, sizeof(test_port_reservation),
-        "%srp2p-test-ports-%u.lock", root, (unsigned)base);
+        "%sredp2p-test-ports-%u.lock", root, (unsigned)base);
     if (length < 0 || (size_t)length >= sizeof(test_port_reservation)) return 0;
     if (!CreateDirectoryA(test_port_reservation, NULL)) {
         test_port_reservation[0] = '\0';
@@ -226,7 +226,7 @@ static int test_port_base_reserve(unsigned short base) {
     tmp = getenv("TMPDIR");
     if (!tmp || !tmp[0]) tmp = "/tmp";
     length = snprintf(test_port_reservation, sizeof(test_port_reservation),
-        "%s/rp2p-test-ports-%u.lock", tmp, (unsigned)base);
+        "%s/redp2p-test-ports-%u.lock", tmp, (unsigned)base);
     if (length < 0 || (size_t)length >= sizeof(test_port_reservation)) return 0;
     if (mkdir(test_port_reservation, 0700) != 0) {
         test_port_reservation[0] = '\0';
@@ -427,7 +427,7 @@ static int test_home(void) {
     base = getenv("TMPDIR");
     if (!base || !base[0]) base = "/tmp";
     if (snprintf(test_home_path, sizeof(test_home_path),
-        "%s/rp2p-test-XXXXXX", base) < 0 ||
+        "%s/redp2p-test-XXXXXX", base) < 0 ||
         strlen(test_home_path) >= sizeof(test_home_path))
         return 1;
     if (!mkdtemp(test_home_path)) return 1;
@@ -462,7 +462,7 @@ static int test_home_cleanup(void) {
 static int test_key_dir(char *path, size_t cap) {
     int n;
 
-    n = snprintf(path, cap, "%s/.local/share/rp2p/keys", test_home_path);
+    n = snprintf(path, cap, "%s/.local/share/redp2p/keys", test_home_path);
     return n < 0 || (size_t)n >= cap ? 1 : 0;
 }
 
@@ -782,17 +782,17 @@ static int test_wait_port(unsigned short port, int open) {
  * @return 0 when startup reaches an observable state, 1 on timeout.
  */
 static int test_wait_publisher_ready(test_publisher_t *publisher) {
-    char request[RP2P_ID_MAX + 32];
-    char expected[RP2P_ID_MAX + 32];
+    char request[REDP2P_ID_MAX + 32];
+    char expected[REDP2P_ID_MAX + 32];
     int request_len;
     int expected_len;
     int observed;
     unsigned int elapsed;
 
     request_len = snprintf(request, sizeof(request),
-        "RP2P_CTRTOK_LOOKUP:%s\n", publisher->id);
+        "REDP2P_CTRTOK_LOOKUP:%s\n", publisher->id);
     expected_len = snprintf(expected, sizeof(expected),
-        "RP2P_CTRTOK_PUBLISHER:%s", publisher->id);
+        "REDP2P_CTRTOK_PUBLISHER:%s", publisher->id);
     if (request_len < 0 || (size_t)request_len >= sizeof(request) ||
         expected_len < 0 || (size_t)expected_len >= sizeof(expected))
         return 1;
@@ -811,7 +811,7 @@ static int test_wait_publisher_ready(test_publisher_t *publisher) {
     }
     fprintf(stderr, "publisher %s startup timed out: result=%d error=%s\n",
         publisher->id, atomic_load(&publisher->result),
-        rp2p_get_error(publisher->ctx));
+        redp2p_get_error(publisher->ctx));
     return 1;
 }
 
@@ -821,16 +821,16 @@ static int test_wait_publisher_ready(test_publisher_t *publisher) {
  * @return None.
  */
 static void test_publisher_wake(test_publisher_t *publisher) {
-    char request[RP2P_ID_MAX + 128];
+    char request[REDP2P_ID_MAX + 128];
     test_socket_t fd;
     int request_len;
 
     fd = test_control_connect(publisher->index_port);
     if (fd == TEST_SOCKET_INVALID) return;
     request_len = snprintf(request, sizeof(request),
-        "RP2P_CTRTOK_PUNCH_REQ2:wake:%s:wake\n"
-        "RP2P_CTRTOK_CAND:host:127.0.0.1:9\n"
-        "RP2P_CTRTOK_END\n", publisher->id);
+        "REDP2P_CTRTOK_PUNCH_REQ2:wake:%s:wake\n"
+        "REDP2P_CTRTOK_CAND:host:127.0.0.1:9\n"
+        "REDP2P_CTRTOK_END\n", publisher->id);
     if (request_len > 0 && (size_t)request_len < sizeof(request))
         test_socket_send_all(fd, (const unsigned char *)request,
             (size_t)request_len);
@@ -852,7 +852,7 @@ static int test_wait_consumer_ready(test_consumer_t *consumer) {
     }
     fprintf(stderr, "consumer %s startup failed: result=%d error=%s\n",
         consumer->self_id, atomic_load(&consumer->result),
-        rp2p_get_error(consumer->ctx));
+        redp2p_get_error(consumer->ctx));
     return 1;
 }
 
@@ -1022,10 +1022,10 @@ static void test_tcp_echo_run(void *arg) {
  * @return None.
  */
 static void test_control_stub_run(void *arg) {
-    static const unsigned char hello_ok[] = "RP2P_CTRTOK_HELLO_OK\n";
-    static const unsigned char incomplete[] = "RP2P_CTRTOK_NOT_FOUND";
+    static const unsigned char hello_ok[] = "REDP2P_CTRTOK_HELLO_OK\n";
+    static const unsigned char incomplete[] = "REDP2P_CTRTOK_NOT_FOUND";
     static const unsigned char version_mismatch[] =
-        "RP2P_CTRTOK_ERROR:version mismatch\n";
+        "REDP2P_CTRTOK_ERROR:version mismatch\n";
     test_control_stub_t *stub;
     int request;
 
@@ -1072,7 +1072,7 @@ static DWORD WINAPI test_index_main(void *arg) {
     test_index_t *index;
 
     index = (test_index_t *)arg;
-    index->result = rp2p_serve_index(index->ctx, NULL, index->port);
+    index->result = redp2p_serve_index(index->ctx, NULL, index->port);
     return 0;
 }
 
@@ -1085,11 +1085,11 @@ static DWORD WINAPI test_publisher_main(void *arg) {
     test_publisher_t *publisher;
 
     publisher = (test_publisher_t *)arg;
-    rp2p_set_protocol(publisher->ctx, publisher->protocol);
-    rp2p_set_port(publisher->ctx, publisher->bind_port);
-    if (publisher->pass != NULL) rp2p_set_pass(publisher->ctx, publisher->pass);
+    redp2p_set_protocol(publisher->ctx, publisher->protocol);
+    redp2p_set_port(publisher->ctx, publisher->bind_port);
+    if (publisher->pass != NULL) redp2p_set_pass(publisher->ctx, publisher->pass);
     atomic_store(&publisher->result,
-        rp2p_wait(publisher->ctx, publisher->host, publisher->index_port,
+        redp2p_wait(publisher->ctx, publisher->host, publisher->index_port,
             publisher->id, publisher->bind_port));
     return 0;
 }
@@ -1103,10 +1103,10 @@ static DWORD WINAPI test_consumer_main(void *arg) {
     test_consumer_t *consumer;
 
     consumer = (test_consumer_t *)arg;
-    rp2p_set_protocol(consumer->ctx, consumer->protocol);
-    rp2p_set_port(consumer->ctx, consumer->bind_port);
+    redp2p_set_protocol(consumer->ctx, consumer->protocol);
+    redp2p_set_port(consumer->ctx, consumer->bind_port);
     atomic_store(&consumer->result,
-        rp2p_connect(consumer->ctx, consumer->host, consumer->index_port,
+        redp2p_connect(consumer->ctx, consumer->host, consumer->index_port,
             consumer->self_id, consumer->target_id, consumer->bind_port));
     return 0;
 }
@@ -1150,7 +1150,7 @@ static void *test_index_main(void *arg) {
     test_index_t *index;
 
     index = (test_index_t *)arg;
-    index->result = rp2p_serve_index(index->ctx, NULL, index->port);
+    index->result = redp2p_serve_index(index->ctx, NULL, index->port);
     return NULL;
 }
 
@@ -1163,11 +1163,11 @@ static void *test_publisher_main(void *arg) {
     test_publisher_t *publisher;
 
     publisher = (test_publisher_t *)arg;
-    rp2p_set_protocol(publisher->ctx, publisher->protocol);
-    rp2p_set_port(publisher->ctx, publisher->bind_port);
-    if (publisher->pass != NULL) rp2p_set_pass(publisher->ctx, publisher->pass);
+    redp2p_set_protocol(publisher->ctx, publisher->protocol);
+    redp2p_set_port(publisher->ctx, publisher->bind_port);
+    if (publisher->pass != NULL) redp2p_set_pass(publisher->ctx, publisher->pass);
     atomic_store(&publisher->result,
-        rp2p_wait(publisher->ctx, publisher->host, publisher->index_port,
+        redp2p_wait(publisher->ctx, publisher->host, publisher->index_port,
             publisher->id, publisher->bind_port));
     return NULL;
 }
@@ -1181,10 +1181,10 @@ static void *test_consumer_main(void *arg) {
     test_consumer_t *consumer;
 
     consumer = (test_consumer_t *)arg;
-    rp2p_set_protocol(consumer->ctx, consumer->protocol);
-    rp2p_set_port(consumer->ctx, consumer->bind_port);
+    redp2p_set_protocol(consumer->ctx, consumer->protocol);
+    redp2p_set_port(consumer->ctx, consumer->bind_port);
     atomic_store(&consumer->result,
-        rp2p_connect(consumer->ctx, consumer->host, consumer->index_port,
+        redp2p_connect(consumer->ctx, consumer->host, consumer->index_port,
             consumer->self_id, consumer->target_id, consumer->bind_port));
     return NULL;
 }
@@ -1268,7 +1268,7 @@ static int test_index_start(test_index_t *index, unsigned short port) {
     memset(index, 0, sizeof(*index));
     index->port = port;
     index->result = 999;
-    if (rp2p_open(&index->ctx) != RP2P_OK) return 1;
+    if (redp2p_open(&index->ctx) != REDP2P_OK) return 1;
     if (test_thread_start(&index->thread, test_index_main, index) != 0) return 1;
     return test_wait_port(port, 1) ? 0 : 1;
 }
@@ -1290,12 +1290,12 @@ static int test_index_start_configured(test_index_t *index,
     memset(index, 0, sizeof(*index));
     index->port = port;
     index->result = 999;
-    if (rp2p_open(&index->ctx) != RP2P_OK) return 1;
-    if (rp2p_set_seats(index->ctx, seats) != RP2P_OK) return 1;
-    if (vip != NULL && rp2p_set_vip(index->ctx, vip, err,
-        sizeof(err)) != RP2P_OK)
+    if (redp2p_open(&index->ctx) != REDP2P_OK) return 1;
+    if (redp2p_set_seats(index->ctx, seats) != REDP2P_OK) return 1;
+    if (vip != NULL && redp2p_set_vip(index->ctx, vip, err,
+        sizeof(err)) != REDP2P_OK)
         return 1;
-    if (pass != NULL && rp2p_set_pass(index->ctx, pass) != RP2P_OK) return 1;
+    if (pass != NULL && redp2p_set_pass(index->ctx, pass) != REDP2P_OK) return 1;
     if (test_thread_start(&index->thread, test_index_main, index) != 0) return 1;
     return test_wait_port(port, 1) ? 0 : 1;
 }
@@ -1306,10 +1306,10 @@ static int test_index_start_configured(test_index_t *index,
  * @return 0 on success.
  */
 static int test_index_stop(test_index_t *index) {
-    if (index->ctx != NULL) rp2p_stop(index->ctx);
+    if (index->ctx != NULL) redp2p_stop(index->ctx);
     test_port_open(index->port);
     test_thread_join(index->thread);
-    if (index->ctx != NULL) rp2p_close(index->ctx);
+    if (index->ctx != NULL) redp2p_close(index->ctx);
     index->ctx = NULL;
     return 0;
 }
@@ -1330,9 +1330,9 @@ unsigned short index_port, unsigned short bind_port)
     publisher->index_port = index_port;
     publisher->id = id;
     publisher->bind_port = bind_port;
-    publisher->protocol = RP2P_PROTO_TCP;
+    publisher->protocol = REDP2P_PROTO_TCP;
     atomic_init(&publisher->result, 999);
-    if (rp2p_open(&publisher->ctx) != RP2P_OK) return 1;
+    if (redp2p_open(&publisher->ctx) != REDP2P_OK) return 1;
     if (test_thread_start(&publisher->thread, test_publisher_main,
         publisher) != 0) return 1;
     return test_wait_publisher_ready(publisher);
@@ -1356,10 +1356,10 @@ static int test_publisher_start_pass(test_publisher_t *publisher,
     publisher->index_port = index_port;
     publisher->id = id;
     publisher->bind_port = bind_port;
-    publisher->protocol = RP2P_PROTO_TCP;
+    publisher->protocol = REDP2P_PROTO_TCP;
     publisher->pass = pass;
     atomic_init(&publisher->result, 999);
-    if (rp2p_open(&publisher->ctx) != RP2P_OK) return 1;
+    if (redp2p_open(&publisher->ctx) != REDP2P_OK) return 1;
     if (test_thread_start(&publisher->thread, test_publisher_main,
         publisher) != 0)
         return 1;
@@ -1372,10 +1372,10 @@ static int test_publisher_start_pass(test_publisher_t *publisher,
  * @return 0 on success.
  */
 static int test_publisher_stop(test_publisher_t *publisher) {
-    if (publisher->ctx != NULL) rp2p_stop(publisher->ctx);
+    if (publisher->ctx != NULL) redp2p_stop(publisher->ctx);
     test_publisher_wake(publisher);
     test_thread_join(publisher->thread);
-    if (publisher->ctx != NULL) rp2p_close(publisher->ctx);
+    if (publisher->ctx != NULL) redp2p_close(publisher->ctx);
     publisher->ctx = NULL;
     return 0;
 }
@@ -1389,7 +1389,7 @@ static int test_publisher_finish(test_publisher_t *publisher) {
     int result;
 
     result = test_thread_join(publisher->thread);
-    if (publisher->ctx != NULL) rp2p_close(publisher->ctx);
+    if (publisher->ctx != NULL) redp2p_close(publisher->ctx);
     publisher->ctx = NULL;
     return result;
 }
@@ -1424,9 +1424,9 @@ static int test_udp_publisher_start(test_publisher_t *publisher,
     publisher->index_port = index_port;
     publisher->id = id;
     publisher->bind_port = bind_port;
-    publisher->protocol = RP2P_PROTO_UDP;
+    publisher->protocol = REDP2P_PROTO_UDP;
     atomic_init(&publisher->result, 999);
-    if (rp2p_open(&publisher->ctx) != RP2P_OK) return 1;
+    if (redp2p_open(&publisher->ctx) != REDP2P_OK) return 1;
     if (test_thread_start(&publisher->thread, test_publisher_main,
         publisher) != 0)
         return 1;
@@ -1447,9 +1447,9 @@ static int test_udp_consumer_start(test_consumer_t *consumer,
     consumer->self_id = self_id;
     consumer->target_id = target_id;
     consumer->bind_port = bind_port;
-    consumer->protocol = RP2P_PROTO_UDP;
+    consumer->protocol = REDP2P_PROTO_UDP;
     atomic_init(&consumer->result, 999);
-    if (rp2p_open(&consumer->ctx) != RP2P_OK) return 1;
+    if (redp2p_open(&consumer->ctx) != REDP2P_OK) return 1;
     if (test_thread_start(&consumer->thread, test_consumer_main,
         consumer) != 0)
         return 1;
@@ -1464,15 +1464,15 @@ static int test_consumer_stop(test_consumer_t *consumer) {
     struct sockaddr_in addr;
     test_socket_t fd;
 
-    if (consumer->ctx != NULL) rp2p_stop(consumer->ctx);
-    fd = socket(AF_INET, consumer->protocol == RP2P_PROTO_TCP ?
+    if (consumer->ctx != NULL) redp2p_stop(consumer->ctx);
+    fd = socket(AF_INET, consumer->protocol == REDP2P_PROTO_TCP ?
         SOCK_STREAM : SOCK_DGRAM, 0);
     if (fd != TEST_SOCKET_INVALID) {
         memset(&addr, 0, sizeof(addr));
         addr.sin_family = AF_INET;
         addr.sin_port = htons(consumer->bind_port);
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        if (consumer->protocol == RP2P_PROTO_TCP)
+        if (consumer->protocol == REDP2P_PROTO_TCP)
             connect(fd, (const struct sockaddr *)&addr, sizeof(addr));
         else
             sendto(fd, "", 0, 0, (const struct sockaddr *)&addr,
@@ -1480,7 +1480,7 @@ static int test_consumer_stop(test_consumer_t *consumer) {
         test_socket_close(fd);
     }
     test_thread_join(consumer->thread);
-    if (consumer->ctx != NULL) rp2p_close(consumer->ctx);
+    if (consumer->ctx != NULL) redp2p_close(consumer->ctx);
     consumer->ctx = NULL;
     return 0;
 }
@@ -1638,9 +1638,9 @@ static int test_tcp_publisher_start(test_publisher_t *publisher,
     publisher->index_port = index_port;
     publisher->id = id;
     publisher->bind_port = bind_port;
-    publisher->protocol = RP2P_PROTO_TCP;
+    publisher->protocol = REDP2P_PROTO_TCP;
     atomic_init(&publisher->result, 999);
-    if (rp2p_open(&publisher->ctx) != RP2P_OK) return 1;
+    if (redp2p_open(&publisher->ctx) != REDP2P_OK) return 1;
     if (test_thread_start(&publisher->thread, test_publisher_main,
         publisher) != 0)
         return 1;
@@ -1661,9 +1661,9 @@ static int test_tcp_consumer_start(test_consumer_t *consumer,
     consumer->self_id = self_id;
     consumer->target_id = target_id;
     consumer->bind_port = bind_port;
-    consumer->protocol = RP2P_PROTO_TCP;
+    consumer->protocol = REDP2P_PROTO_TCP;
     atomic_init(&consumer->result, 999);
-    if (rp2p_open(&consumer->ctx) != RP2P_OK) return 1;
+    if (redp2p_open(&consumer->ctx) != REDP2P_OK) return 1;
     if (test_thread_start(&consumer->thread, test_consumer_main,
         consumer) != 0)
         return 1;
@@ -1828,7 +1828,7 @@ static int test_control_receive_line(test_socket_t fd, char *line, size_t cap) {
  * @return Connected socket, or TEST_SOCKET_INVALID on failure.
  */
 static test_socket_t test_control_connect(unsigned short port) {
-    static const unsigned char hello[] = "RP2P_CTRTOK_HELLO RP2P/1\n";
+    static const unsigned char hello[] = "REDP2P_CTRTOK_HELLO REDP2P/1\n";
     test_socket_t fd;
     char line[128];
 
@@ -1837,7 +1837,7 @@ static test_socket_t test_control_connect(unsigned short port) {
     test_socket_timeout(fd, 2000U);
     if (test_socket_send_all(fd, hello, sizeof(hello) - 1) != 0 ||
         test_control_receive_line(fd, line, sizeof(line)) < 0 ||
-        strcmp(line, "RP2P_CTRTOK_HELLO_OK") != 0)
+        strcmp(line, "REDP2P_CTRTOK_HELLO_OK") != 0)
     {
         test_socket_close(fd);
         return TEST_SOCKET_INVALID;
@@ -1900,7 +1900,7 @@ static int test_udp_roundtrip(unsigned short port, const unsigned char *data,
 {
     test_socket_t fd;
     struct sockaddr_in addr;
-    unsigned char received[RP2P_UDP_PAYLOAD_MAX + 1];
+    unsigned char received[REDP2P_UDP_PAYLOAD_MAX + 1];
     unsigned int attempts;
     unsigned int i;
     int n;
@@ -1970,8 +1970,8 @@ static void test_on_publisher(const char *id, void *userdata) {
 
     publishers = (test_publishers_t *)userdata;
     if (publishers->count >= 8) return;
-    strncpy(publishers->ids[publishers->count], id, RP2P_ID_MAX);
-    publishers->ids[publishers->count][RP2P_ID_MAX] = '\0';
+    strncpy(publishers->ids[publishers->count], id, REDP2P_ID_MAX);
+    publishers->ids[publishers->count][REDP2P_ID_MAX] = '\0';
     publishers->count++;
 }
 
@@ -1991,15 +1991,15 @@ static int test_has_publisher(test_publishers_t *publishers, const char *id) {
 }
 
 /**
- * Tests rp2p_options_default.
+ * Tests redp2p_options_default.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_options_default(void) {
-    rp2p_options_t opts;
+static int case_redp2p_options_default(void) {
+    redp2p_options_t opts;
     int rc;
 
     rc = 0;
-    opts = rp2p_options_default();
+    opts = redp2p_options_default();
     rc += expect_size("default seats are unrestricted", 0, opts.seats);
     rc += expect_int("default pow", 0, opts.pow);
     rc += expect_int("default sweep", 20, opts.sweep);
@@ -2009,287 +2009,287 @@ static int case_rp2p_options_default(void) {
 }
 
 /**
- * Tests rp2p_options_load_env.
+ * Tests redp2p_options_load_env.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_options_load_env(void) {
-    rp2p_options_t opts;
+static int case_redp2p_options_load_env(void) {
+    redp2p_options_t opts;
     int rc;
 
     rc = 0;
-    opts = rp2p_options_default();
-    test_setenv("RP2P_SEATS", "7");
-    test_setenv("RP2P_POW", "3");
-    test_setenv("RP2P_PASS", "secret");
-    test_setenv("RP2P_VIP", "vip vip-pass");
-    test_setenv("RP2P_SWEEP", "9");
-    test_setenv("RP2P_STUN", "stun:example.com:3478");
-    rp2p_options_load_env(&opts);
+    opts = redp2p_options_default();
+    test_setenv("REDP2P_SEATS", "7");
+    test_setenv("REDP2P_POW", "3");
+    test_setenv("REDP2P_PASS", "secret");
+    test_setenv("REDP2P_VIP", "vip vip-pass");
+    test_setenv("REDP2P_SWEEP", "9");
+    test_setenv("REDP2P_STUN", "stun:example.com:3478");
+    redp2p_options_load_env(&opts);
     rc += expect_size("env seats", 7, opts.seats);
     rc += expect_int("env pow", 3, opts.pow);
     rc += expect_string("env pass", "secret", opts.pass);
     rc += expect_string("env vip", "vip vip-pass", opts.vip);
     rc += expect_int("env sweep", 9, opts.sweep);
     rc += expect_string("env stun", "stun:example.com:3478", opts.stun_url);
-    rp2p_options_load_env(NULL);
-    rp2p_options_free(&opts);
-    test_setenv("RP2P_SEATS", NULL);
-    test_setenv("RP2P_POW", NULL);
-    test_setenv("RP2P_PASS", NULL);
-    test_setenv("RP2P_VIP", NULL);
-    test_setenv("RP2P_SWEEP", NULL);
-    test_setenv("RP2P_STUN", NULL);
+    redp2p_options_load_env(NULL);
+    redp2p_options_free(&opts);
+    test_setenv("REDP2P_SEATS", NULL);
+    test_setenv("REDP2P_POW", NULL);
+    test_setenv("REDP2P_PASS", NULL);
+    test_setenv("REDP2P_VIP", NULL);
+    test_setenv("REDP2P_SWEEP", NULL);
+    test_setenv("REDP2P_STUN", NULL);
     return rc == 0 ? 0 : 1;
 }
 
 /**
- * Tests rp2p_options_load_env strict rejection.
+ * Tests redp2p_options_load_env strict rejection.
  * Summary: Invalid numeric environment values are ignored and keep defaults.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_options_load_env_invalid(void) {
+static int case_redp2p_options_load_env_invalid(void) {
     static const char *invalid[] = {
         "+1", "-1", " 1", "1 ", "1x", ""
     };
     char allocation_overflow[64];
     char numeric_overflow[64];
-    rp2p_options_t opts;
+    redp2p_options_t opts;
     int rc;
     size_t i;
     size_t max_peer_count;
 
     rc = 0;
     for (i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
-        opts = rp2p_options_default();
-        test_setenv("RP2P_SEATS", invalid[i]);
-        test_setenv("RP2P_POW", invalid[i]);
-        test_setenv("RP2P_SWEEP", invalid[i]);
-        rp2p_options_load_env(&opts);
+        opts = redp2p_options_default();
+        test_setenv("REDP2P_SEATS", invalid[i]);
+        test_setenv("REDP2P_POW", invalid[i]);
+        test_setenv("REDP2P_SWEEP", invalid[i]);
+        redp2p_options_load_env(&opts);
         rc += expect_size("invalid seats kept default", 0,
             opts.seats);
         rc += expect_int("invalid pow kept default", 0, opts.pow);
         rc += expect_int("invalid sweep kept default", 20, opts.sweep);
-        rp2p_options_free(&opts);
+        redp2p_options_free(&opts);
     }
-    max_peer_count = SIZE_MAX / sizeof(rp2p_peer_t);
+    max_peer_count = SIZE_MAX / sizeof(redp2p_peer_t);
     snprintf(allocation_overflow, sizeof(allocation_overflow), "%zu",
         max_peer_count + 1);
     snprintf(numeric_overflow, sizeof(numeric_overflow), "%zu0", SIZE_MAX);
-    opts = rp2p_options_default();
-    test_setenv("RP2P_SEATS", allocation_overflow);
-    rp2p_options_load_env(&opts);
+    opts = redp2p_options_default();
+    test_setenv("REDP2P_SEATS", allocation_overflow);
+    redp2p_options_load_env(&opts);
     rc += expect_size("allocation-overflow seats kept default", 0,
         opts.seats);
-    rp2p_options_free(&opts);
-    opts = rp2p_options_default();
-    test_setenv("RP2P_SEATS", numeric_overflow);
-    rp2p_options_load_env(&opts);
+    redp2p_options_free(&opts);
+    opts = redp2p_options_default();
+    test_setenv("REDP2P_SEATS", numeric_overflow);
+    redp2p_options_load_env(&opts);
     rc += expect_size("numeric-overflow seats kept default", 0, opts.seats);
-    rp2p_options_free(&opts);
-    opts = rp2p_options_default();
-    test_setenv("RP2P_SEATS", "0");
-    test_setenv("RP2P_POW", "0");
-    test_setenv("RP2P_SWEEP", "0");
-    rp2p_options_load_env(&opts);
+    redp2p_options_free(&opts);
+    opts = redp2p_options_default();
+    test_setenv("REDP2P_SEATS", "0");
+    test_setenv("REDP2P_POW", "0");
+    test_setenv("REDP2P_SWEEP", "0");
+    redp2p_options_load_env(&opts);
     rc += expect_size("zero seats accepted", 0, opts.seats);
     rc += expect_int("zero pow accepted", 0, opts.pow);
     rc += expect_int("zero sweep accepted", 0, opts.sweep);
-    rp2p_options_free(&opts);
-    test_setenv("RP2P_SEATS", NULL);
-    test_setenv("RP2P_POW", NULL);
-    test_setenv("RP2P_SWEEP", NULL);
+    redp2p_options_free(&opts);
+    test_setenv("REDP2P_SEATS", NULL);
+    test_setenv("REDP2P_POW", NULL);
+    test_setenv("REDP2P_SWEEP", NULL);
     return rc == 0 ? 0 : 1;
 }
 
 /**
- * Tests rp2p_options_free.
+ * Tests redp2p_options_free.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_options_free(void) {
-    rp2p_options_t opts;
+static int case_redp2p_options_free(void) {
+    redp2p_options_t opts;
     int rc;
 
     rc = 0;
-    opts = rp2p_options_default();
-    test_setenv("RP2P_VIP", "one pass");
-    rp2p_options_load_env(&opts);
+    opts = redp2p_options_default();
+    test_setenv("REDP2P_VIP", "one pass");
+    redp2p_options_load_env(&opts);
     rc += expect_true("vip allocated", opts.vip != NULL);
-    rp2p_options_free(&opts);
+    redp2p_options_free(&opts);
     rc += expect_true("vip cleared", opts.vip == NULL);
-    rp2p_options_free(&opts);
-    rp2p_options_free(NULL);
-    test_setenv("RP2P_VIP", NULL);
+    redp2p_options_free(&opts);
+    redp2p_options_free(NULL);
+    test_setenv("REDP2P_VIP", NULL);
     return rc == 0 ? 0 : 1;
 }
 
 /**
- * Tests rp2p_open.
+ * Tests redp2p_open.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_open(void) {
-    rp2p_t *ctx;
+static int case_redp2p_open(void) {
+    redp2p_t *ctx;
     int rc;
 
     rc = 0;
     ctx = NULL;
-    rc += expect_int("open NULL", RP2P_ERROR, rp2p_open(NULL));
-    rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
+    rc += expect_int("open NULL", REDP2P_ERROR, redp2p_open(NULL));
+    rc += expect_int("open context", REDP2P_OK, redp2p_open(&ctx));
     rc += expect_true("context is set", ctx != NULL);
-    if (ctx != NULL) rp2p_close(ctx);
+    if (ctx != NULL) redp2p_close(ctx);
     return rc == 0 ? 0 : 1;
 }
 
 /**
- * Tests rp2p_close.
+ * Tests redp2p_close.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_close(void) {
-    rp2p_t *ctx;
+static int case_redp2p_close(void) {
+    redp2p_t *ctx;
     int rc;
 
     rc = 0;
-    rc += expect_int("close NULL", RP2P_ERROR, rp2p_close(NULL));
-    rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
-    rc += expect_int("close context", RP2P_OK, rp2p_close(ctx));
+    rc += expect_int("close NULL", REDP2P_ERROR, redp2p_close(NULL));
+    rc += expect_int("open context", REDP2P_OK, redp2p_open(&ctx));
+    rc += expect_int("close context", REDP2P_OK, redp2p_close(ctx));
     return rc == 0 ? 0 : 1;
 }
 
 /**
- * Tests rp2p_stop.
+ * Tests redp2p_stop.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_stop(void) {
-    rp2p_t *ctx;
+static int case_redp2p_stop(void) {
+    redp2p_t *ctx;
     int rc;
 
     rc = 0;
-    rc += expect_int("stop NULL", RP2P_EINVAL, rp2p_stop(NULL));
-    rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
-    rc += expect_true("stop initially clear", !rp2p_stop_requested(ctx));
-    rc += expect_int("stop context", RP2P_OK, rp2p_stop(ctx));
-    rc += expect_true("stop requested", rp2p_stop_requested(ctx));
-    rc += expect_int("stop context twice", RP2P_OK, rp2p_stop(ctx));
-    rc += expect_true("stop remains requested", rp2p_stop_requested(ctx));
-    rp2p_close(ctx);
+    rc += expect_int("stop NULL", REDP2P_EINVAL, redp2p_stop(NULL));
+    rc += expect_int("open context", REDP2P_OK, redp2p_open(&ctx));
+    rc += expect_true("stop initially clear", !redp2p_stop_requested(ctx));
+    rc += expect_int("stop context", REDP2P_OK, redp2p_stop(ctx));
+    rc += expect_true("stop requested", redp2p_stop_requested(ctx));
+    rc += expect_int("stop context twice", REDP2P_OK, redp2p_stop(ctx));
+    rc += expect_true("stop remains requested", redp2p_stop_requested(ctx));
+    redp2p_close(ctx);
     return rc == 0 ? 0 : 1;
 }
 
 /**
- * Tests rp2p_version.
+ * Tests redp2p_version.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_version(void) {
-    return expect_true("version is available", rp2p_version() != 0U);
+static int case_redp2p_version(void) {
+    return expect_true("version is available", redp2p_version() != 0U);
 }
 
 /**
- * Tests rp2p_strerror.
+ * Tests redp2p_strerror.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_strerror(void) {
+static int case_redp2p_strerror(void) {
     int rc;
 
     rc = 0;
-    rc += expect_string("OK text", "OK", rp2p_strerror(RP2P_OK));
-    rc += expect_string("ERROR text", "general error", rp2p_strerror(RP2P_ERROR));
-    rc += expect_string("ENET text", "network error", rp2p_strerror(RP2P_ENET));
-    rc += expect_string("ENOENT text", "peer not found", rp2p_strerror(RP2P_ENOENT));
-    rc += expect_string("ETIMEOUT text", "timeout", rp2p_strerror(RP2P_ETIMEOUT));
-    rc += expect_string("EFULL text", "peer table full", rp2p_strerror(RP2P_EFULL));
+    rc += expect_string("OK text", "OK", redp2p_strerror(REDP2P_OK));
+    rc += expect_string("ERROR text", "general error", redp2p_strerror(REDP2P_ERROR));
+    rc += expect_string("ENET text", "network error", redp2p_strerror(REDP2P_ENET));
+    rc += expect_string("ENOENT text", "peer not found", redp2p_strerror(REDP2P_ENOENT));
+    rc += expect_string("ETIMEOUT text", "timeout", redp2p_strerror(REDP2P_ETIMEOUT));
+    rc += expect_string("EFULL text", "peer table full", redp2p_strerror(REDP2P_EFULL));
     rc += expect_string("EINVAL text", "invalid argument",
-        rp2p_strerror(RP2P_EINVAL));
+        redp2p_strerror(REDP2P_EINVAL));
     rc += expect_string("EPROTO text", "protocol error",
-        rp2p_strerror(RP2P_EPROTO));
+        redp2p_strerror(REDP2P_EPROTO));
     rc += expect_string("EAUTH text", "authentication failed",
-        rp2p_strerror(RP2P_EAUTH));
+        redp2p_strerror(REDP2P_EAUTH));
     rc += expect_string("EVERSION text", "unsupported protocol version",
-        rp2p_strerror(RP2P_EVERSION));
+        redp2p_strerror(REDP2P_EVERSION));
     rc += expect_string("EPUNCH text", "direct connectivity failed",
-        rp2p_strerror(RP2P_EPUNCH));
-    rc += expect_string("unknown text", "unknown error", rp2p_strerror(999));
+        redp2p_strerror(REDP2P_EPUNCH));
+    rc += expect_string("unknown text", "unknown error", redp2p_strerror(999));
     return rc == 0 ? 0 : 1;
 }
 
 /**
- * Tests rp2p_is_valid_id.
+ * Tests redp2p_is_valid_id.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_is_valid_id(void) {
+static int case_redp2p_is_valid_id(void) {
     int rc;
 
     rc = 0;
-    rc += expect_int("alphanumeric id", 1, rp2p_is_valid_id("abcXYZ123"));
-    rc += expect_int("single id", 1, rp2p_is_valid_id("a"));
-    rc += expect_int("NULL id", 0, rp2p_is_valid_id(NULL));
-    rc += expect_int("empty id", 0, rp2p_is_valid_id(""));
-    rc += expect_int("punctuation id", 0, rp2p_is_valid_id("bad:id"));
-    rc += expect_int("space id", 0, rp2p_is_valid_id("bad id"));
-    rc += expect_int("long id", 0, rp2p_is_valid_id(
+    rc += expect_int("alphanumeric id", 1, redp2p_is_valid_id("abcXYZ123"));
+    rc += expect_int("single id", 1, redp2p_is_valid_id("a"));
+    rc += expect_int("NULL id", 0, redp2p_is_valid_id(NULL));
+    rc += expect_int("empty id", 0, redp2p_is_valid_id(""));
+    rc += expect_int("punctuation id", 0, redp2p_is_valid_id("bad:id"));
+    rc += expect_int("space id", 0, redp2p_is_valid_id("bad id"));
+    rc += expect_int("long id", 0, redp2p_is_valid_id(
         "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"));
     return rc == 0 ? 0 : 1;
 }
 
 /**
- * Tests rp2p_is_valid_pass_token.
+ * Tests redp2p_is_valid_pass_token.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_is_valid_pass_token(void) {
+static int case_redp2p_is_valid_pass_token(void) {
     int rc;
 
     rc = 0;
-    rc += expect_int("safe pass", 1, rp2p_is_valid_pass_token("a._-+=,:@%/"));
-    rc += expect_int("single pass", 1, rp2p_is_valid_pass_token("x"));
-    rc += expect_int("NULL pass", 0, rp2p_is_valid_pass_token(NULL));
-    rc += expect_int("empty pass", 0, rp2p_is_valid_pass_token(""));
-    rc += expect_int("space pass", 0, rp2p_is_valid_pass_token("bad pass"));
-    rc += expect_int("unsafe pass", 0, rp2p_is_valid_pass_token("bad`pass"));
+    rc += expect_int("safe pass", 1, redp2p_is_valid_pass_token("a._-+=,:@%/"));
+    rc += expect_int("single pass", 1, redp2p_is_valid_pass_token("x"));
+    rc += expect_int("NULL pass", 0, redp2p_is_valid_pass_token(NULL));
+    rc += expect_int("empty pass", 0, redp2p_is_valid_pass_token(""));
+    rc += expect_int("space pass", 0, redp2p_is_valid_pass_token("bad pass"));
+    rc += expect_int("unsafe pass", 0, redp2p_is_valid_pass_token("bad`pass"));
     return rc == 0 ? 0 : 1;
 }
 
 /**
- * Tests rp2p_serve_index.
+ * Tests redp2p_serve_index.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_serve_index(void) {
+static int case_redp2p_serve_index(void) {
     static const unsigned char malformed_register[] =
-        "RP2P_CTRTOK_REGISTER:bad:id\n";
+        "REDP2P_CTRTOK_REGISTER:bad:id\n";
     static const unsigned char embedded_nul[] =
-        "RP2P_CTRTOK_LOOKUP:missing\0junk\n";
+        "REDP2P_CTRTOK_LOOKUP:missing\0junk\n";
     static const unsigned char prohibited_control[] =
-        "RP2P_CTRTOK_LOOKUP:missing\tjunk\n";
+        "REDP2P_CTRTOK_LOOKUP:missing\tjunk\n";
     static const unsigned char incomplete_line[] =
-        "RP2P_CTRTOK_REGISTER:partial";
+        "REDP2P_CTRTOK_REGISTER:partial";
     static const unsigned char unknown_command[] =
-        "RP2P_CTRTOK_UNKNOWN\n";
+        "REDP2P_CTRTOK_UNKNOWN\n";
     static const unsigned char empty_candidates[] =
-        "RP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
-        "RP2P_CTRTOK_END\n";
+        "REDP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
+        "REDP2P_CTRTOK_END\n";
     static const unsigned char invalid_candidate_type[] =
-        "RP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
-        "RP2P_CTRTOK_CAND:invalid:127.0.0.1:9\n"
-        "RP2P_CTRTOK_END\n";
+        "REDP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
+        "REDP2P_CTRTOK_CAND:invalid:127.0.0.1:9\n"
+        "REDP2P_CTRTOK_END\n";
     static const unsigned char invalid_candidate_address[] =
-        "RP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
-        "RP2P_CTRTOK_CAND:host:not-an-address:9\n"
-        "RP2P_CTRTOK_END\n";
+        "REDP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
+        "REDP2P_CTRTOK_CAND:host:not-an-address:9\n"
+        "REDP2P_CTRTOK_END\n";
     static const unsigned char invalid_candidate_port[] =
-        "RP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
-        "RP2P_CTRTOK_CAND:host:127.0.0.1:0\n"
-        "RP2P_CTRTOK_END\n";
+        "REDP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
+        "REDP2P_CTRTOK_CAND:host:127.0.0.1:0\n"
+        "REDP2P_CTRTOK_END\n";
     static const unsigned char candidate_nul[] =
-        "RP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
-        "RP2P_CTRTOK_CAND:host:127.0.0.1:9\0junk\n"
-        "RP2P_CTRTOK_END\n";
+        "REDP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
+        "REDP2P_CTRTOK_CAND:host:127.0.0.1:9\0junk\n"
+        "REDP2P_CTRTOK_END\n";
     static const unsigned char missing_candidate_end[] =
-        "RP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
-        "RP2P_CTRTOK_CAND:host:127.0.0.1:9\n";
+        "REDP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
+        "REDP2P_CTRTOK_CAND:host:127.0.0.1:9\n";
     static const unsigned char list_publishers[] =
-        "RP2P_CTRTOK_LIST_PUBLISHERS\n";
+        "REDP2P_CTRTOK_LIST_PUBLISHERS\n";
     test_index_t index;
     test_publisher_t first;
     test_publisher_t second;
     test_publisher_t third;
-    rp2p_t *stopped;
+    redp2p_t *stopped;
     unsigned char overlong[1102];
     char too_many[4096];
     unsigned short port;
@@ -2299,14 +2299,14 @@ static int case_rp2p_serve_index(void) {
 
     rc = 0;
     port = (unsigned short)(test_port_base() + 1U);
-    rc += expect_int("serve NULL", RP2P_EINVAL,
-        rp2p_serve_index(NULL, TEST_HOST, port));
-    rc += expect_int("open stopped index context", RP2P_OK,
-        rp2p_open(&stopped));
-    rc += expect_int("stop index before entry", RP2P_OK,
-        rp2p_stop(stopped));
-    rc += expect_int("serve honors prior stop", RP2P_OK,
-        rp2p_serve_index(stopped, TEST_HOST, port));
+    rc += expect_int("serve NULL", REDP2P_EINVAL,
+        redp2p_serve_index(NULL, TEST_HOST, port));
+    rc += expect_int("open stopped index context", REDP2P_OK,
+        redp2p_open(&stopped));
+    rc += expect_int("stop index before entry", REDP2P_OK,
+        redp2p_stop(stopped));
+    rc += expect_int("serve honors prior stop", REDP2P_OK,
+        redp2p_serve_index(stopped, TEST_HOST, port));
     rc += expect_true("prior-stopped index did not listen",
         !test_port_open(port));
     memset(&index, 0, sizeof(index));
@@ -2320,18 +2320,18 @@ static int case_rp2p_serve_index(void) {
     rc += expect_int("reject malformed REGISTER", 0,
         test_control_request(port, malformed_register,
             sizeof(malformed_register) - 1,
-            "RP2P_CTRTOK_ERROR:invalid id"));
+            "REDP2P_CTRTOK_ERROR:invalid id"));
     rc += expect_int("reject embedded NUL command", 0,
         test_control_request(port, embedded_nul, sizeof(embedded_nul) - 1,
-            "RP2P_CTRTOK_ERROR:malformed"));
+            "REDP2P_CTRTOK_ERROR:malformed"));
     rc += expect_int("reject prohibited command control", 0,
         test_control_request(port, prohibited_control,
             sizeof(prohibited_control) - 1,
-            "RP2P_CTRTOK_ERROR:malformed"));
+            "REDP2P_CTRTOK_ERROR:malformed"));
     rc += expect_int("reject unknown command", 0,
         test_control_request(port, unknown_command,
             sizeof(unknown_command) - 1,
-            "RP2P_CTRTOK_ERROR:unknown command"));
+            "REDP2P_CTRTOK_ERROR:unknown command"));
     rc += expect_int("close incomplete command", 0,
         test_control_incomplete_closed(port, incomplete_line,
             sizeof(incomplete_line) - 1));
@@ -2342,32 +2342,32 @@ static int case_rp2p_serve_index(void) {
     rc += expect_int("reject empty candidate block", 0,
         test_control_request(port, empty_candidates,
             sizeof(empty_candidates) - 1,
-            "RP2P_CTRTOK_ERROR:malformed"));
+            "REDP2P_CTRTOK_ERROR:malformed"));
     rc += expect_int("reject candidate type", 0,
         test_control_request(port, invalid_candidate_type,
             sizeof(invalid_candidate_type) - 1,
-            "RP2P_CTRTOK_ERROR:malformed"));
+            "REDP2P_CTRTOK_ERROR:malformed"));
     rc += expect_int("reject candidate address", 0,
         test_control_request(port, invalid_candidate_address,
             sizeof(invalid_candidate_address) - 1,
-            "RP2P_CTRTOK_ERROR:malformed"));
+            "REDP2P_CTRTOK_ERROR:malformed"));
     rc += expect_int("reject candidate port", 0,
         test_control_request(port, invalid_candidate_port,
             sizeof(invalid_candidate_port) - 1,
-            "RP2P_CTRTOK_ERROR:malformed"));
+            "REDP2P_CTRTOK_ERROR:malformed"));
     rc += expect_int("reject candidate embedded NUL", 0,
         test_control_request(port, candidate_nul, sizeof(candidate_nul) - 1,
-            "RP2P_CTRTOK_ERROR:malformed"));
+            "REDP2P_CTRTOK_ERROR:malformed"));
     rc += expect_int("close candidate block missing END", 0,
         test_control_incomplete_closed(port, missing_candidate_end,
             sizeof(missing_candidate_end) - 1));
     used = (size_t)snprintf(too_many, sizeof(too_many),
-        "RP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n");
+        "REDP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n");
     for (i = 0; i < 17 && used < sizeof(too_many); i++) {
         int written;
 
         written = snprintf(too_many + used, sizeof(too_many) - used,
-            "RP2P_CTRTOK_CAND:host:127.0.0.1:%d\n", i + 1);
+            "REDP2P_CTRTOK_CAND:host:127.0.0.1:%d\n", i + 1);
         if (written < 0 || (size_t)written >= sizeof(too_many) - used) {
             used = sizeof(too_many);
             break;
@@ -2376,7 +2376,7 @@ static int case_rp2p_serve_index(void) {
     }
     if (used < sizeof(too_many)) {
         int written = snprintf(too_many + used, sizeof(too_many) - used,
-            "RP2P_CTRTOK_END\n");
+            "REDP2P_CTRTOK_END\n");
         if (written < 0 || (size_t)written >= sizeof(too_many) - used)
             used = sizeof(too_many);
         else
@@ -2387,12 +2387,12 @@ static int case_rp2p_serve_index(void) {
     if (used < sizeof(too_many))
         rc += expect_int("reject excessive candidate count", 0,
             test_control_request(port, (const unsigned char *)too_many, used,
-                "RP2P_CTRTOK_ERROR:malformed"));
+                "REDP2P_CTRTOK_ERROR:malformed"));
     rc += expect_int("index usable after malformed controls", 0,
         test_control_request(port, list_publishers,
-            sizeof(list_publishers) - 1, "RP2P_CTRTOK_END"));
+            sizeof(list_publishers) - 1, "REDP2P_CTRTOK_END"));
     test_index_stop(&index);
-    rc += expect_int("stopped index result", RP2P_OK, index.result);
+    rc += expect_int("stopped index result", REDP2P_OK, index.result);
     rc += expect_true("index port closed", test_wait_port(port, 0));
 
     port = (unsigned short)(test_port_base() + 2U);
@@ -2413,17 +2413,17 @@ static int case_rp2p_serve_index(void) {
             (unsigned short)(port + 22U)));
     rc += expect_true("capacity reached is reported",
         test_publisher_wait_result(&third, 2000U));
-    rc += expect_int("capacity rejection category", RP2P_EFULL,
+    rc += expect_int("capacity rejection category", REDP2P_EFULL,
         atomic_load(&third.result));
     rc += expect_true("capacity rejection detail",
-        strstr(rp2p_get_error(third.ctx), "full") != NULL);
+        strstr(redp2p_get_error(third.ctx), "full") != NULL);
     test_publisher_finish(&third);
     test_publisher_stop(&first);
     rc += expect_int("lookup removed disconnected publisher", 0,
         test_control_request(port,
-            (const unsigned char *)"RP2P_CTRTOK_LOOKUP:capone\n",
-            strlen("RP2P_CTRTOK_LOOKUP:capone\n"),
-            "RP2P_CTRTOK_NOT_FOUND"));
+            (const unsigned char *)"REDP2P_CTRTOK_LOOKUP:capone\n",
+            strlen("REDP2P_CTRTOK_LOOKUP:capone\n"),
+            "REDP2P_CTRTOK_NOT_FOUND"));
     rc += expect_int("start publisher after capacity release", 0,
         test_publisher_start(&third, "capthree", port,
             (unsigned short)(port + 22U)));
@@ -2452,7 +2452,7 @@ static int case_rp2p_serve_index(void) {
             (unsigned short)(port + 22U), "globalpass"));
     rc += expect_true("VIP reservation limits non-VIP seats",
         test_publisher_wait_result(&third, 2000U));
-    rc += expect_int("reserved capacity rejection category", RP2P_EFULL,
+    rc += expect_int("reserved capacity rejection category", REDP2P_EFULL,
         atomic_load(&third.result));
     test_publisher_finish(&third);
     rc += expect_int("start wrong-password VIP publisher", 0,
@@ -2460,10 +2460,10 @@ static int case_rp2p_serve_index(void) {
             (unsigned short)(port + 22U), "wrongpass"));
     rc += expect_true("wrong-password VIP publisher returns",
         test_publisher_wait_result(&third, 2000U));
-    rc += expect_int("registration mismatch category", RP2P_EAUTH,
+    rc += expect_int("registration mismatch category", REDP2P_EAUTH,
         atomic_load(&third.result));
     rc += expect_true("registration mismatch detail",
-        strstr(rp2p_get_error(third.ctx), "authentication") != NULL);
+        strstr(redp2p_get_error(third.ctx), "authentication") != NULL);
     test_publisher_finish(&third);
     test_publisher_stop(&second);
     test_publisher_stop(&first);
@@ -2477,7 +2477,7 @@ static int case_rp2p_serve_index(void) {
             (unsigned short)(port + 20U)));
     rc += expect_true("zero seats rejects publisher",
         test_publisher_wait_result(&first, 2000U));
-    rc += expect_int("zero-seat rejection category", RP2P_EFULL,
+    rc += expect_int("zero-seat rejection category", REDP2P_EFULL,
         atomic_load(&first.result));
     test_publisher_finish(&first);
     test_index_stop(&index);
@@ -2485,29 +2485,29 @@ static int case_rp2p_serve_index(void) {
 }
 
 /**
- * Tests rp2p_wait.
+ * Tests redp2p_wait.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_wait(void) {
+static int case_redp2p_wait(void) {
     test_index_t index;
     test_publisher_t publisher;
-    rp2p_t *ctx;
+    redp2p_t *ctx;
     unsigned short base;
     int rc;
 
     rc = 0;
     base = (unsigned short)(test_port_base() + 20U);
-    rc += expect_int("wait NULL", RP2P_EINVAL,
-        rp2p_wait(NULL, TEST_HOST, base, "pub", (unsigned short)(base + 1U)));
-    rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
-    rc += expect_int("stop wait before entry", RP2P_OK, rp2p_stop(ctx));
-    rc += expect_int("wait honors prior stop", RP2P_OK,
-        rp2p_wait(ctx, TEST_HOST, base, "pub",
+    rc += expect_int("wait NULL", REDP2P_EINVAL,
+        redp2p_wait(NULL, TEST_HOST, base, "pub", (unsigned short)(base + 1U)));
+    rc += expect_int("open context", REDP2P_OK, redp2p_open(&ctx));
+    rc += expect_int("stop wait before entry", REDP2P_OK, redp2p_stop(ctx));
+    rc += expect_int("wait honors prior stop", REDP2P_OK,
+        redp2p_wait(ctx, TEST_HOST, base, "pub",
             (unsigned short)(base + 1U)));
-    rc += expect_true("wait stop consumed", !rp2p_stop_requested(ctx));
-    rc += expect_int("wait without index", RP2P_ENET,
-        rp2p_wait(ctx, TEST_HOST, base, "pub", (unsigned short)(base + 1U)));
-    rp2p_close(ctx);
+    rc += expect_true("wait stop consumed", !redp2p_stop_requested(ctx));
+    rc += expect_int("wait without index", REDP2P_ENET,
+        redp2p_wait(ctx, TEST_HOST, base, "pub", (unsigned short)(base + 1U)));
+    redp2p_close(ctx);
     if (test_index_start(&index, (unsigned short)(base + 2U)) != 0) return 1;
     if (test_publisher_start(&publisher, "waitpub", (unsigned short)(base + 2U),
         (unsigned short)(base + 3U)) != 0) return 1;
@@ -2516,64 +2516,64 @@ static int case_rp2p_wait(void) {
     test_index_stop(&index);
     rc += expect_true("publisher exits after index stop",
         test_publisher_wait_result(&publisher, 3000U));
-    rc += expect_int("index loss publisher category", RP2P_ENET,
+    rc += expect_int("index loss publisher category", REDP2P_ENET,
         atomic_load(&publisher.result));
     rc += expect_true("index loss publisher detail",
-        strstr(rp2p_get_error(publisher.ctx), "control") != NULL);
+        strstr(redp2p_get_error(publisher.ctx), "control") != NULL);
     test_publisher_finish(&publisher);
     return rc == 0 ? 0 : 1;
 }
 
 /**
- * Tests rp2p_connect.
+ * Tests redp2p_connect.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_connect(void) {
+static int case_redp2p_connect(void) {
     test_control_stub_t stub;
     test_index_t index;
     test_publisher_t publisher;
     test_tcp_echo_t occupied;
-    rp2p_t *ctx;
+    redp2p_t *ctx;
     unsigned short base;
     int stub_started;
     int rc;
 
     rc = 0;
     base = (unsigned short)(test_port_base() + 40U);
-    rc += expect_int("connect NULL", RP2P_EINVAL,
-        rp2p_connect(NULL, TEST_HOST, base, "client", "missing",
+    rc += expect_int("connect NULL", REDP2P_EINVAL,
+        redp2p_connect(NULL, TEST_HOST, base, "client", "missing",
             (unsigned short)(base + 1U)));
-    rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
-    rp2p_set_port(ctx, (unsigned short)(base + 1U));
-    rc += expect_int("stop connect before entry", RP2P_OK, rp2p_stop(ctx));
-    rc += expect_int("connect honors prior stop", RP2P_OK,
-        rp2p_connect(ctx, TEST_HOST, base, "client", "missing",
+    rc += expect_int("open context", REDP2P_OK, redp2p_open(&ctx));
+    redp2p_set_port(ctx, (unsigned short)(base + 1U));
+    rc += expect_int("stop connect before entry", REDP2P_OK, redp2p_stop(ctx));
+    rc += expect_int("connect honors prior stop", REDP2P_OK,
+        redp2p_connect(ctx, TEST_HOST, base, "client", "missing",
             (unsigned short)(base + 1U)));
-    rc += expect_true("connect stop consumed", !rp2p_stop_requested(ctx));
-    rp2p_set_port(ctx, (unsigned short)(base + 1U));
-    rc += expect_int("connect without index", RP2P_ENET,
-        rp2p_connect(ctx, TEST_HOST, base, "client", "missing",
+    rc += expect_true("connect stop consumed", !redp2p_stop_requested(ctx));
+    redp2p_set_port(ctx, (unsigned short)(base + 1U));
+    rc += expect_int("connect without index", REDP2P_ENET,
+        redp2p_connect(ctx, TEST_HOST, base, "client", "missing",
             (unsigned short)(base + 1U)));
-    rp2p_close(ctx);
+    redp2p_close(ctx);
     if (test_index_start(&index, (unsigned short)(base + 2U)) != 0) return 1;
-    rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
-    rp2p_set_port(ctx, (unsigned short)(base + 3U));
-    rc += expect_int("connect missing target", RP2P_ENOENT,
-        rp2p_connect(ctx, TEST_HOST, (unsigned short)(base + 2U), "client",
+    rc += expect_int("open context", REDP2P_OK, redp2p_open(&ctx));
+    redp2p_set_port(ctx, (unsigned short)(base + 3U));
+    rc += expect_int("connect missing target", REDP2P_ENOENT,
+        redp2p_connect(ctx, TEST_HOST, (unsigned short)(base + 2U), "client",
             "missing", (unsigned short)(base + 3U)));
-    rp2p_close(ctx);
+    redp2p_close(ctx);
     rc += expect_int("start occupied-listener publisher", 0,
         test_publisher_start(&publisher, "occupied",
             (unsigned short)(base + 2U), (unsigned short)(base + 6U)));
     rc += expect_int("occupy consumer listener", 0,
         test_tcp_echo_start(&occupied, (unsigned short)(base + 7U)));
-    rc += expect_int("open occupied-listener context", RP2P_OK,
-        rp2p_open(&ctx));
-    rp2p_set_port(ctx, (unsigned short)(base + 7U));
-    rc += expect_int("occupied consumer listener category", RP2P_ENET,
-        rp2p_connect(ctx, TEST_HOST, (unsigned short)(base + 2U), "client",
+    rc += expect_int("open occupied-listener context", REDP2P_OK,
+        redp2p_open(&ctx));
+    redp2p_set_port(ctx, (unsigned short)(base + 7U));
+    rc += expect_int("occupied consumer listener category", REDP2P_ENET,
+        redp2p_connect(ctx, TEST_HOST, (unsigned short)(base + 2U), "client",
             "occupied", (unsigned short)(base + 7U)));
-    rp2p_close(ctx);
+    redp2p_close(ctx);
     test_tcp_echo_stop(&occupied);
     test_publisher_stop(&publisher);
     test_index_stop(&index);
@@ -2581,17 +2581,17 @@ static int case_rp2p_connect(void) {
         (unsigned short)(base + 4U));
     rc += expect_int("start incomplete control response", 0, stub_started);
     if (stub_started == 0) {
-        rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
-        rp2p_set_port(ctx, (unsigned short)(base + 5U));
-        rc += expect_int("reject incomplete control response", RP2P_ENET,
-            rp2p_connect(ctx, TEST_HOST, (unsigned short)(base + 4U),
+        rc += expect_int("open context", REDP2P_OK, redp2p_open(&ctx));
+        redp2p_set_port(ctx, (unsigned short)(base + 5U));
+        rc += expect_int("reject incomplete control response", REDP2P_ENET,
+            redp2p_connect(ctx, TEST_HOST, (unsigned short)(base + 4U),
                 "client", "missing", (unsigned short)(base + 5U)));
-        rc += expect_int("control version mismatch category", RP2P_EVERSION,
-            rp2p_connect(ctx, TEST_HOST, (unsigned short)(base + 4U),
+        rc += expect_int("control version mismatch category", REDP2P_EVERSION,
+            redp2p_connect(ctx, TEST_HOST, (unsigned short)(base + 4U),
                 "client", "missing", (unsigned short)(base + 5U)));
         rc += expect_true("control version mismatch detail",
-            strstr(rp2p_get_error(ctx), "version mismatch") != NULL);
-        rp2p_close(ctx);
+            strstr(redp2p_get_error(ctx), "version mismatch") != NULL);
+        redp2p_close(ctx);
         rc += expect_int("stop incomplete control response", 0,
             test_control_stub_stop(&stub));
     }
@@ -2608,7 +2608,7 @@ static int test_udp_tunnel_case(void)
     test_publisher_t publisher;
     test_consumer_t consumer;
     test_udp_echo_t echo;
-    unsigned char payload[RP2P_UDP_PAYLOAD_MAX + 1];
+    unsigned char payload[REDP2P_UDP_PAYLOAD_MAX + 1];
     unsigned short base;
     unsigned int elapsed;
     int rc;
@@ -2632,27 +2632,27 @@ static int test_udp_tunnel_case(void)
         if (small_result < 0)
             fprintf(stderr,
                 "consumer result: %d error: %s\npublisher result: %d error: %s\n",
-                atomic_load(&consumer.result), rp2p_get_error(consumer.ctx),
+                atomic_load(&consumer.result), redp2p_get_error(consumer.ctx),
                 atomic_load(&publisher.result),
-                rp2p_get_error(publisher.ctx));
+                redp2p_get_error(publisher.ctx));
         rc += expect_int("UDP empty datagram", 0,
             test_udp_roundtrip((unsigned short)(base + 2U), payload, 0, 3000U));
-        rc += expect_int("UDP maximum datagram", RP2P_UDP_PAYLOAD_MAX,
+        rc += expect_int("UDP maximum datagram", REDP2P_UDP_PAYLOAD_MAX,
             test_udp_roundtrip((unsigned short)(base + 2U), payload,
-                RP2P_UDP_PAYLOAD_MAX, 3000U));
+                REDP2P_UDP_PAYLOAD_MAX, 3000U));
         rc += expect_int("send UDP oversized datagram", 0,
             test_udp_send_only((unsigned short)(base + 2U), payload,
-                RP2P_UDP_PAYLOAD_MAX + 1));
+                REDP2P_UDP_PAYLOAD_MAX + 1));
         for (elapsed = 0; elapsed < 2000U; elapsed += 50U) {
-            if (strstr(rp2p_get_error(consumer.ctx),
+            if (strstr(redp2p_get_error(consumer.ctx),
                 "exceeds maximum") != NULL)
                 break;
             test_sleep_ms(50U);
         }
         rc += expect_true("UDP oversized datagram rejected",
-            rp2p_get_error(consumer.ctx)[0] != '\0');
+            redp2p_get_error(consumer.ctx)[0] != '\0');
         rc += expect_true("UDP oversized detail",
-            strstr(rp2p_get_error(consumer.ctx), "exceeds maximum") != NULL);
+            strstr(redp2p_get_error(consumer.ctx), "exceeds maximum") != NULL);
     }
     test_consumer_stop(&consumer);
     test_publisher_stop(&publisher);
@@ -2665,7 +2665,7 @@ static int test_udp_tunnel_case(void)
  * Tests plaintext UDP datagrams and MTU enforcement.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_udp_tunnel(void) {
+static int case_redp2p_udp_tunnel(void) {
     return test_udp_tunnel_case();
 }
 
@@ -2701,13 +2701,13 @@ static int test_tcp_stream_coverage(unsigned short port, test_tcp_echo_t *echo) 
     rc = 0;
     drop_previous = NULL;
     reorder_previous = NULL;
-    env = getenv("RP2P_DEBUG_STREAM_DROP_EVERY");
+    env = getenv("REDP2P_DEBUG_STREAM_DROP_EVERY");
     if (env != NULL) {
         drop_previous = (char *)malloc(strlen(env) + 1U);
         if (drop_previous != NULL) memcpy(drop_previous, env, strlen(env) + 1U);
     }
     drop_saved = env == NULL || drop_previous != NULL;
-    env = getenv("RP2P_DEBUG_STREAM_REORDER_EVERY");
+    env = getenv("REDP2P_DEBUG_STREAM_REORDER_EVERY");
     if (env != NULL) {
         reorder_previous = (char *)malloc(strlen(env) + 1U);
         if (reorder_previous != NULL)
@@ -2717,8 +2717,8 @@ static int test_tcp_stream_coverage(unsigned short port, test_tcp_echo_t *echo) 
     fault_env_ready = drop_saved && reorder_saved;
     rc += expect_true("save TCP fault environment", fault_env_ready);
     if (fault_env_ready) {
-        fault_env_ready = test_setenv("RP2P_DEBUG_STREAM_DROP_EVERY", "7") == 0 &&
-            test_setenv("RP2P_DEBUG_STREAM_REORDER_EVERY", "11") == 0;
+        fault_env_ready = test_setenv("REDP2P_DEBUG_STREAM_DROP_EVERY", "7") == 0 &&
+            test_setenv("REDP2P_DEBUG_STREAM_REORDER_EVERY", "11") == 0;
         rc += expect_true("enable TCP drop and reorder faults", fault_env_ready);
     }
     large = (unsigned char *)malloc(TEST_TCP_LARGE_SIZE);
@@ -2732,10 +2732,10 @@ static int test_tcp_stream_coverage(unsigned short port, test_tcp_echo_t *echo) 
                 test_tcp_roundtrip(port, large, TEST_TCP_LARGE_SIZE));
     }
     rc += expect_int("restore TCP drop fault environment", 0,
-        drop_saved ? test_setenv("RP2P_DEBUG_STREAM_DROP_EVERY",
+        drop_saved ? test_setenv("REDP2P_DEBUG_STREAM_DROP_EVERY",
             drop_previous) : 0);
     rc += expect_int("restore TCP reorder fault environment", 0,
-        reorder_saved ? test_setenv("RP2P_DEBUG_STREAM_REORDER_EVERY",
+        reorder_saved ? test_setenv("REDP2P_DEBUG_STREAM_REORDER_EVERY",
             reorder_previous) : 0);
     free(drop_previous);
     free(reorder_previous);
@@ -2882,22 +2882,22 @@ static int test_tcp_tunnel_case(void)
  * Tests TCP stream through the public API.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_tcp_stream(void) {
+static int case_redp2p_tcp_stream(void) {
     return test_tcp_tunnel_case();
 }
 
 /**
- * Tests rp2p_deregister.
+ * Tests redp2p_deregister.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_deregister(void) {
+static int case_redp2p_deregister(void) {
     test_index_t first_index;
     test_index_t second_index;
     test_publisher_t first_publisher;
     test_publisher_t second_publisher;
     test_publisher_t publisher;
     test_publishers_t publishers;
-    rp2p_t *client;
+    redp2p_t *client;
     char names[8][128];
     char paths[8][768];
     char key_data[64];
@@ -2934,21 +2934,21 @@ static int case_rp2p_deregister(void) {
     old_umask = umask(000);
 #endif
     base = (unsigned short)(test_port_base() + 60U);
-    rc += expect_int("open client", RP2P_OK, rp2p_open(&client));
+    rc += expect_int("open client", REDP2P_OK, redp2p_open(&client));
     if (!client) goto cleanup;
-    rc += expect_int("deregister NULL context", RP2P_EINVAL,
-        rp2p_deregister(NULL, TEST_HOST, base, "absent"));
-    rc += expect_int("deregister NULL host", RP2P_EINVAL,
-        rp2p_deregister(client, NULL, base, "absent"));
-    rc += expect_true("NULL host detail", rp2p_get_error(client)[0] != '\0');
-    rc += expect_int("deregister empty host", RP2P_EINVAL,
-        rp2p_deregister(client, "", base, "absent"));
-    rc += expect_int("deregister zero port", RP2P_EINVAL,
-        rp2p_deregister(client, TEST_HOST, 0, "absent"));
-    rc += expect_int("deregister invalid id", RP2P_EINVAL,
-        rp2p_deregister(client, TEST_HOST, base, "../unsafe"));
-    rc += expect_int("deregister missing key", RP2P_ENOENT,
-        rp2p_deregister(client, TEST_HOST, base, "absent"));
+    rc += expect_int("deregister NULL context", REDP2P_EINVAL,
+        redp2p_deregister(NULL, TEST_HOST, base, "absent"));
+    rc += expect_int("deregister NULL host", REDP2P_EINVAL,
+        redp2p_deregister(client, NULL, base, "absent"));
+    rc += expect_true("NULL host detail", redp2p_get_error(client)[0] != '\0');
+    rc += expect_int("deregister empty host", REDP2P_EINVAL,
+        redp2p_deregister(client, "", base, "absent"));
+    rc += expect_int("deregister zero port", REDP2P_EINVAL,
+        redp2p_deregister(client, TEST_HOST, 0, "absent"));
+    rc += expect_int("deregister invalid id", REDP2P_EINVAL,
+        redp2p_deregister(client, TEST_HOST, base, "../unsafe"));
+    rc += expect_int("deregister missing key", REDP2P_ENOENT,
+        redp2p_deregister(client, TEST_HOST, base, "absent"));
 
     if (test_index_start(&first_index, (unsigned short)(base + 1U)) != 0)
         goto cleanup;
@@ -2996,11 +2996,11 @@ static int case_rp2p_deregister(void) {
 #endif
     }
 
-    rc += expect_int("deregister first scoped publisher", RP2P_OK,
-        rp2p_deregister(client, TEST_HOST, (unsigned short)(base + 1U),
+    rc += expect_int("deregister first scoped publisher", REDP2P_OK,
+        redp2p_deregister(client, TEST_HOST, (unsigned short)(base + 1U),
             "shared"));
     rc += expect_string("successful deregistration clears detail", "",
-        rp2p_get_error(client));
+        redp2p_get_error(client));
     rc += expect_int("list remaining scoped key", 0,
         test_key_list(names, 8, &count));
     rc += expect_int("successful deregistration deletes one key", 1, count);
@@ -3015,20 +3015,20 @@ static int case_rp2p_deregister(void) {
 
     rc += expect_int("write malformed key", 0,
         test_file_write(paths[0], "0123456789abcdeg", 16));
-    rc += expect_int("reject malformed key", RP2P_EPROTO,
-        rp2p_deregister(client, TEST_HOST, (unsigned short)(base + 2U),
+    rc += expect_int("reject malformed key", REDP2P_EPROTO,
+        redp2p_deregister(client, TEST_HOST, (unsigned short)(base + 2U),
             "shared"));
     rc += expect_true("malformed key preserved", test_path_exists(paths[0]));
     rc += expect_int("write truncated key", 0,
         test_file_write(paths[0], "01234567", 8));
-    rc += expect_int("reject truncated key", RP2P_EPROTO,
-        rp2p_deregister(client, TEST_HOST, (unsigned short)(base + 2U),
+    rc += expect_int("reject truncated key", REDP2P_EPROTO,
+        redp2p_deregister(client, TEST_HOST, (unsigned short)(base + 2U),
             "shared"));
     rc += expect_true("truncated key preserved", test_path_exists(paths[0]));
     rc += expect_int("write extra key", 0,
         test_file_write(paths[0], "0123456789abcdefx", 17));
-    rc += expect_int("reject extra key", RP2P_EPROTO,
-        rp2p_deregister(client, TEST_HOST, (unsigned short)(base + 2U),
+    rc += expect_int("reject extra key", REDP2P_EPROTO,
+        redp2p_deregister(client, TEST_HOST, (unsigned short)(base + 2U),
             "shared"));
     rc += expect_true("extra key preserved", test_path_exists(paths[0]));
     rc += expect_int("restore valid key", 0,
@@ -3036,8 +3036,8 @@ static int case_rp2p_deregister(void) {
 
     test_index_stop(&second_index);
     second_index_started = 0;
-    rc += expect_int("failed deregistration category", RP2P_ENET,
-        rp2p_deregister(client, TEST_HOST, (unsigned short)(base + 2U),
+    rc += expect_int("failed deregistration category", REDP2P_ENET,
+        redp2p_deregister(client, TEST_HOST, (unsigned short)(base + 2U),
             "shared"));
     rc += expect_true("failed deregistration preserves key",
         test_path_exists(paths[0]));
@@ -3046,8 +3046,8 @@ static int case_rp2p_deregister(void) {
     remove(paths[0]);
 #ifndef _WIN32
     rc += expect_int("create key path directory", 0, mkdir(paths[0], 0700));
-    rc += expect_int("reject key path directory", RP2P_ERROR,
-        rp2p_deregister(client, TEST_HOST, (unsigned short)(base + 2U),
+    rc += expect_int("reject key path directory", REDP2P_ERROR,
+        redp2p_deregister(client, TEST_HOST, (unsigned short)(base + 2U),
             "shared"));
     rc += expect_int("remove key path directory", 0, rmdir(paths[0]));
 #endif
@@ -3080,8 +3080,8 @@ static int case_rp2p_deregister(void) {
     rc += expect_int("create legacy key", 0,
         test_file_write(legacy_path, key_data, key_len));
     rc += expect_int("remove scoped key for migration", 0, remove(paths[0]));
-    rc += expect_int("legacy deregistration", RP2P_OK,
-        rp2p_deregister(client, TEST_HOST, (unsigned short)(base + 1U),
+    rc += expect_int("legacy deregistration", REDP2P_OK,
+        redp2p_deregister(client, TEST_HOST, (unsigned short)(base + 1U),
             "legacy"));
     rc += expect_true("successful legacy lookup removes legacy key",
         !test_path_exists(legacy_path));
@@ -3091,25 +3091,25 @@ static int case_rp2p_deregister(void) {
 #ifdef _WIN32
     test_setenv("USERPROFILE", test_home_path);
     test_setenv("HOME", NULL);
-    rc += expect_int("missing HOME uses USERPROFILE", RP2P_ENOENT,
-        rp2p_deregister(client, TEST_HOST, base, "absent"));
+    rc += expect_int("missing HOME uses USERPROFILE", REDP2P_ENOENT,
+        redp2p_deregister(client, TEST_HOST, base, "absent"));
     test_setenv("HOME", "");
-    rc += expect_int("empty HOME uses USERPROFILE", RP2P_ENOENT,
-        rp2p_deregister(client, TEST_HOST, base, "absent"));
+    rc += expect_int("empty HOME uses USERPROFILE", REDP2P_ENOENT,
+        redp2p_deregister(client, TEST_HOST, base, "absent"));
 #else
     test_setenv("HOME", NULL);
-    rc += expect_int("missing HOME category", RP2P_ERROR,
-        rp2p_deregister(client, TEST_HOST, base, "absent"));
-    rc += expect_true("missing HOME detail", rp2p_get_error(client)[0] != '\0');
+    rc += expect_int("missing HOME category", REDP2P_ERROR,
+        redp2p_deregister(client, TEST_HOST, base, "absent"));
+    rc += expect_true("missing HOME detail", redp2p_get_error(client)[0] != '\0');
     test_setenv("HOME", "");
-    rc += expect_int("empty HOME category", RP2P_ERROR,
-        rp2p_deregister(client, TEST_HOST, base, "absent"));
+    rc += expect_int("empty HOME category", REDP2P_ERROR,
+        redp2p_deregister(client, TEST_HOST, base, "absent"));
 #endif
     memset(long_home, 'x', sizeof(long_home) - 1);
     long_home[sizeof(long_home) - 1] = '\0';
     test_setenv("HOME", long_home);
-    rc += expect_int("overlong HOME category", RP2P_ERROR,
-        rp2p_deregister(client, TEST_HOST, base, "absent"));
+    rc += expect_int("overlong HOME category", REDP2P_ERROR,
+        redp2p_deregister(client, TEST_HOST, base, "absent"));
     test_setenv("HOME", test_home_path);
 
     if (snprintf(blocked_home, sizeof(blocked_home), "%s/blocked-home",
@@ -3126,14 +3126,14 @@ static int case_rp2p_deregister(void) {
     publisher_started = 1;
     rc += expect_true("unwritable HOME publisher returns",
         test_publisher_wait_result(&publisher, 3000U));
-    rc += expect_int("unwritable HOME publication fails", RP2P_ERROR,
+    rc += expect_int("unwritable HOME publication fails", REDP2P_ERROR,
         atomic_load(&publisher.result));
     test_setenv("HOME", test_home_path);
     test_publisher_finish(&publisher);
     publisher_started = 0;
     memset(&publishers, 0, sizeof(publishers));
-    rc += expect_int("list after save rollback", RP2P_OK,
-        rp2p_list_publishers(client, TEST_HOST,
+    rc += expect_int("list after save rollback", REDP2P_OK,
+        redp2p_list_publishers(client, TEST_HOST,
             (unsigned short)(base + 1U), test_on_publisher, &publishers));
     rc += expect_true("save failure registration rolled back",
         !test_has_publisher(&publishers, "nosave"));
@@ -3145,7 +3145,7 @@ cleanup:
     if (first_publisher_started) test_publisher_stop(&first_publisher);
     if (second_index_started) test_index_stop(&second_index);
     if (first_index_started) test_index_stop(&first_index);
-    if (client) rp2p_close(client);
+    if (client) redp2p_close(client);
 #ifndef _WIN32
     umask(old_umask);
 #endif
@@ -3153,44 +3153,44 @@ cleanup:
 }
 
 /**
- * Tests rp2p_list_publishers.
+ * Tests redp2p_list_publishers.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_list_publishers(void) {
+static int case_redp2p_list_publishers(void) {
     test_index_t index;
     test_publisher_t publisher;
     test_publisher_t replacement;
     test_publishers_t publishers;
-    rp2p_t *client;
+    redp2p_t *client;
     unsigned short base;
     int rc;
 
     rc = 0;
     base = (unsigned short)(test_port_base() + 80U);
-    rc += expect_int("list NULL ctx", RP2P_ERROR,
-        rp2p_list_publishers(NULL, TEST_HOST, base, test_on_publisher, NULL));
-    rc += expect_int("open client", RP2P_OK, rp2p_open(&client));
-    rc += expect_int("list NULL host", RP2P_ERROR,
-        rp2p_list_publishers(client, NULL, base, test_on_publisher, NULL));
-    rc += expect_int("list NULL callback", RP2P_ERROR,
-        rp2p_list_publishers(client, TEST_HOST, base, NULL, NULL));
-    rc += expect_int("list without index", RP2P_ENET,
-        rp2p_list_publishers(client, TEST_HOST, base, test_on_publisher, NULL));
-    rp2p_close(client);
+    rc += expect_int("list NULL ctx", REDP2P_ERROR,
+        redp2p_list_publishers(NULL, TEST_HOST, base, test_on_publisher, NULL));
+    rc += expect_int("open client", REDP2P_OK, redp2p_open(&client));
+    rc += expect_int("list NULL host", REDP2P_ERROR,
+        redp2p_list_publishers(client, NULL, base, test_on_publisher, NULL));
+    rc += expect_int("list NULL callback", REDP2P_ERROR,
+        redp2p_list_publishers(client, TEST_HOST, base, NULL, NULL));
+    rc += expect_int("list without index", REDP2P_ENET,
+        redp2p_list_publishers(client, TEST_HOST, base, test_on_publisher, NULL));
+    redp2p_close(client);
     if (test_index_start(&index, (unsigned short)(base + 1U)) != 0) return 1;
     if (test_publisher_start(&publisher, "listed", (unsigned short)(base + 1U),
         (unsigned short)(base + 2U)) != 0) return 1;
     memset(&publishers, 0, sizeof(publishers));
-    rc += expect_int("open client", RP2P_OK, rp2p_open(&client));
-    rc += expect_int("seed stale list detail", RP2P_EINVAL,
-        rp2p_set_protocol(client, 7));
-    rc += expect_int("list publishers", RP2P_OK,
-        rp2p_list_publishers(client, TEST_HOST, (unsigned short)(base + 1U),
+    rc += expect_int("open client", REDP2P_OK, redp2p_open(&client));
+    rc += expect_int("seed stale list detail", REDP2P_EINVAL,
+        redp2p_set_protocol(client, 7));
+    rc += expect_int("list publishers", REDP2P_OK,
+        redp2p_list_publishers(client, TEST_HOST, (unsigned short)(base + 1U),
             test_on_publisher, &publishers));
     rc += expect_true("publisher listed", test_has_publisher(&publishers, "listed"));
     rc += expect_string("successful list clears detail", "",
-        rp2p_get_error(client));
-    rp2p_close(client);
+        redp2p_get_error(client));
+    redp2p_close(client);
     test_publisher_stop(&publisher);
     rc += expect_int("start original duplicate publisher", 0,
         test_publisher_start(&publisher, "duplicate",
@@ -3202,20 +3202,20 @@ static int case_rp2p_list_publishers(void) {
         atomic_load(&replacement.result) == 999);
     test_publisher_stop(&publisher);
     memset(&publishers, 0, sizeof(publishers));
-    rc += expect_int("open duplicate list client", RP2P_OK,
-        rp2p_open(&client));
-    rc += expect_int("list after old duplicate disconnect", RP2P_OK,
-        rp2p_list_publishers(client, TEST_HOST,
+    rc += expect_int("open duplicate list client", REDP2P_OK,
+        redp2p_open(&client));
+    rc += expect_int("list after old duplicate disconnect", REDP2P_OK,
+        redp2p_list_publishers(client, TEST_HOST,
             (unsigned short)(base + 1U), test_on_publisher, &publishers));
     rc += expect_true("new duplicate retains registration",
         test_has_publisher(&publishers, "duplicate"));
-    rp2p_close(client);
+    redp2p_close(client);
     test_publisher_stop(&replacement);
     rc += expect_int("lookup after current publisher disconnect", 0,
         test_control_request((unsigned short)(base + 1U),
-            (const unsigned char *)"RP2P_CTRTOK_LOOKUP:duplicate\n",
-            strlen("RP2P_CTRTOK_LOOKUP:duplicate\n"),
-            "RP2P_CTRTOK_NOT_FOUND"));
+            (const unsigned char *)"REDP2P_CTRTOK_LOOKUP:duplicate\n",
+            strlen("REDP2P_CTRTOK_LOOKUP:duplicate\n"),
+            "REDP2P_CTRTOK_NOT_FOUND"));
     test_index_stop(&index);
     return rc == 0 ? 0 : 1;
 }
@@ -3224,187 +3224,187 @@ static int case_rp2p_list_publishers(void) {
  * Tests context-owned error detail lifetime and clearing.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_get_error(void) {
-    rp2p_t *ctx;
+static int case_redp2p_get_error(void) {
+    redp2p_t *ctx;
     int rc;
 
     rc = 0;
-    rc += expect_string("NULL ctx empty", "", rp2p_get_error(NULL));
-    rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
-    rc += expect_string("cleared default", "", rp2p_get_error(ctx));
-    rc += expect_int("invalid protocol category", RP2P_EINVAL,
-        rp2p_set_protocol(ctx, 7));
+    rc += expect_string("NULL ctx empty", "", redp2p_get_error(NULL));
+    rc += expect_int("open context", REDP2P_OK, redp2p_open(&ctx));
+    rc += expect_string("cleared default", "", redp2p_get_error(ctx));
+    rc += expect_int("invalid protocol category", REDP2P_EINVAL,
+        redp2p_set_protocol(ctx, 7));
     rc += expect_string("captured detail",
-        "protocol must be RP2P_PROTO_TCP or RP2P_PROTO_UDP",
-        rp2p_get_error(ctx));
-    rc += expect_int("valid protocol", RP2P_OK,
-        rp2p_set_protocol(ctx, RP2P_PROTO_TCP));
-    rc += expect_string("success clears detail", "", rp2p_get_error(ctx));
-    rp2p_close(ctx);
+        "protocol must be REDP2P_PROTO_TCP or REDP2P_PROTO_UDP",
+        redp2p_get_error(ctx));
+    rc += expect_int("valid protocol", REDP2P_OK,
+        redp2p_set_protocol(ctx, REDP2P_PROTO_TCP));
+    rc += expect_string("success clears detail", "", redp2p_get_error(ctx));
+    redp2p_close(ctx);
     return rc == 0 ? 0 : 1;
 }
 
 /**
- * Tests rp2p_set_seats.
+ * Tests redp2p_set_seats.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_set_seats(void) {
-    rp2p_t *ctx;
+static int case_redp2p_set_seats(void) {
+    redp2p_t *ctx;
     int rc;
     size_t max_peer_count;
 
     rc = 0;
-    rc += expect_int("set seats NULL", RP2P_EINVAL, rp2p_set_seats(NULL, 1));
-    rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
-    max_peer_count = SIZE_MAX / sizeof(rp2p_peer_t);
-    rc += expect_int("set zero seats", RP2P_OK, rp2p_set_seats(ctx, 0));
-    rc += expect_int("set seats positive", RP2P_OK, rp2p_set_seats(ctx, 2));
-    rc += expect_int("reject allocation count overflow", RP2P_EINVAL,
-        rp2p_set_seats(ctx, max_peer_count + 1));
-    rp2p_close(ctx);
+    rc += expect_int("set seats NULL", REDP2P_EINVAL, redp2p_set_seats(NULL, 1));
+    rc += expect_int("open context", REDP2P_OK, redp2p_open(&ctx));
+    max_peer_count = SIZE_MAX / sizeof(redp2p_peer_t);
+    rc += expect_int("set zero seats", REDP2P_OK, redp2p_set_seats(ctx, 0));
+    rc += expect_int("set seats positive", REDP2P_OK, redp2p_set_seats(ctx, 2));
+    rc += expect_int("reject allocation count overflow", REDP2P_EINVAL,
+        redp2p_set_seats(ctx, max_peer_count + 1));
+    redp2p_close(ctx);
     return rc == 0 ? 0 : 1;
 }
 
 /**
- * Tests rp2p_set_pow.
+ * Tests redp2p_set_pow.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_set_pow(void) {
-    rp2p_t *ctx;
+static int case_redp2p_set_pow(void) {
+    redp2p_t *ctx;
     int rc;
 
     rc = 0;
-    rc += expect_int("set pow NULL", RP2P_EINVAL, rp2p_set_pow(NULL, 1));
-    rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
-    rc += expect_int("set pow positive", RP2P_OK, rp2p_set_pow(ctx, 2));
-    rc += expect_int("set pow negative", RP2P_EINVAL, rp2p_set_pow(ctx, -1));
-    rp2p_close(ctx);
+    rc += expect_int("set pow NULL", REDP2P_EINVAL, redp2p_set_pow(NULL, 1));
+    rc += expect_int("open context", REDP2P_OK, redp2p_open(&ctx));
+    rc += expect_int("set pow positive", REDP2P_OK, redp2p_set_pow(ctx, 2));
+    rc += expect_int("set pow negative", REDP2P_EINVAL, redp2p_set_pow(ctx, -1));
+    redp2p_close(ctx);
     return rc == 0 ? 0 : 1;
 }
 
 /**
- * Tests rp2p_set_port.
+ * Tests redp2p_set_port.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_set_port(void) {
-    rp2p_t *ctx;
+static int case_redp2p_set_port(void) {
+    redp2p_t *ctx;
     int rc;
 
     rc = 0;
-    rc += expect_int("set port NULL", RP2P_EINVAL, rp2p_set_port(NULL, 1));
-    rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
-    rc += expect_int("set port value", RP2P_OK, rp2p_set_port(ctx, 12345));
-    rc += expect_int("set port zero", RP2P_EINVAL, rp2p_set_port(ctx, 0));
-    rp2p_close(ctx);
+    rc += expect_int("set port NULL", REDP2P_EINVAL, redp2p_set_port(NULL, 1));
+    rc += expect_int("open context", REDP2P_OK, redp2p_open(&ctx));
+    rc += expect_int("set port value", REDP2P_OK, redp2p_set_port(ctx, 12345));
+    rc += expect_int("set port zero", REDP2P_EINVAL, redp2p_set_port(ctx, 0));
+    redp2p_close(ctx);
     return rc == 0 ? 0 : 1;
 }
 
 /**
- * Tests rp2p_set_protocol.
+ * Tests redp2p_set_protocol.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_set_protocol(void) {
-    rp2p_t *ctx;
+static int case_redp2p_set_protocol(void) {
+    redp2p_t *ctx;
     int rc;
 
     rc = 0;
-    rc += expect_int("set protocol NULL", RP2P_EINVAL,
-        rp2p_set_protocol(NULL, RP2P_PROTO_TCP));
-    rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
-    rc += expect_int("set TCP", RP2P_OK, rp2p_set_protocol(ctx, RP2P_PROTO_TCP));
-    rc += expect_int("set UDP", RP2P_OK, rp2p_set_protocol(ctx, RP2P_PROTO_UDP));
-    rc += expect_int("set invalid protocol", RP2P_EINVAL,
-        rp2p_set_protocol(ctx, 99));
-    rp2p_close(ctx);
+    rc += expect_int("set protocol NULL", REDP2P_EINVAL,
+        redp2p_set_protocol(NULL, REDP2P_PROTO_TCP));
+    rc += expect_int("open context", REDP2P_OK, redp2p_open(&ctx));
+    rc += expect_int("set TCP", REDP2P_OK, redp2p_set_protocol(ctx, REDP2P_PROTO_TCP));
+    rc += expect_int("set UDP", REDP2P_OK, redp2p_set_protocol(ctx, REDP2P_PROTO_UDP));
+    rc += expect_int("set invalid protocol", REDP2P_EINVAL,
+        redp2p_set_protocol(ctx, 99));
+    redp2p_close(ctx);
     return rc == 0 ? 0 : 1;
 }
 
 /**
- * Tests rp2p_set_pass.
+ * Tests redp2p_set_pass.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_set_pass(void) {
-    rp2p_t *ctx;
+static int case_redp2p_set_pass(void) {
+    redp2p_t *ctx;
     int rc;
 
     rc = 0;
-    rc += expect_int("set pass NULL ctx", RP2P_EINVAL,
-        rp2p_set_pass(NULL, "x"));
-    rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
-    rc += expect_int("set pass", RP2P_OK, rp2p_set_pass(ctx, "secret"));
-    rc += expect_int("clear pass", RP2P_OK, rp2p_set_pass(ctx, ""));
-    rc += expect_int("set NULL pass", RP2P_EINVAL, rp2p_set_pass(ctx, NULL));
-    rc += expect_int("set unsafe pass", RP2P_EINVAL,
-        rp2p_set_pass(ctx, "bad`pass"));
-    rp2p_close(ctx);
+    rc += expect_int("set pass NULL ctx", REDP2P_EINVAL,
+        redp2p_set_pass(NULL, "x"));
+    rc += expect_int("open context", REDP2P_OK, redp2p_open(&ctx));
+    rc += expect_int("set pass", REDP2P_OK, redp2p_set_pass(ctx, "secret"));
+    rc += expect_int("clear pass", REDP2P_OK, redp2p_set_pass(ctx, ""));
+    rc += expect_int("set NULL pass", REDP2P_EINVAL, redp2p_set_pass(ctx, NULL));
+    rc += expect_int("set unsafe pass", REDP2P_EINVAL,
+        redp2p_set_pass(ctx, "bad`pass"));
+    redp2p_close(ctx);
     return rc == 0 ? 0 : 1;
 }
 
 /**
- * Tests rp2p_set_vip.
+ * Tests redp2p_set_vip.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_set_vip(void) {
-    rp2p_t *ctx;
+static int case_redp2p_set_vip(void) {
+    redp2p_t *ctx;
     char err[128];
     int rc;
 
     rc = 0;
-    rc += expect_int("set vip NULL ctx", RP2P_ERROR,
-        rp2p_set_vip(NULL, "vip pass", err, sizeof(err)));
-    rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
-    rc += expect_int("set vip pair", RP2P_OK,
-        rp2p_set_vip(ctx, "vip pass", err, sizeof(err)));
-    rc += expect_int("clear vip NULL", RP2P_OK,
-        rp2p_set_vip(ctx, NULL, err, sizeof(err)));
-    rc += expect_int("clear vip empty", RP2P_OK,
-        rp2p_set_vip(ctx, "", err, sizeof(err)));
-    rc += expect_int("reject odd vip tokens", RP2P_ERROR,
-        rp2p_set_vip(ctx, "vip", err, sizeof(err)));
-    rc += expect_int("reject bad vip id", RP2P_ERROR,
-        rp2p_set_vip(ctx, "bad:id pass", err, sizeof(err)));
-    rc += expect_int("reject bad vip pass", RP2P_ERROR,
-        rp2p_set_vip(ctx, "vip bad`pass", err, sizeof(err)));
-    rc += expect_int("reject duplicate vip", RP2P_ERROR,
-        rp2p_set_vip(ctx, "vip pass vip other", err, sizeof(err)));
-    rp2p_close(ctx);
+    rc += expect_int("set vip NULL ctx", REDP2P_ERROR,
+        redp2p_set_vip(NULL, "vip pass", err, sizeof(err)));
+    rc += expect_int("open context", REDP2P_OK, redp2p_open(&ctx));
+    rc += expect_int("set vip pair", REDP2P_OK,
+        redp2p_set_vip(ctx, "vip pass", err, sizeof(err)));
+    rc += expect_int("clear vip NULL", REDP2P_OK,
+        redp2p_set_vip(ctx, NULL, err, sizeof(err)));
+    rc += expect_int("clear vip empty", REDP2P_OK,
+        redp2p_set_vip(ctx, "", err, sizeof(err)));
+    rc += expect_int("reject odd vip tokens", REDP2P_ERROR,
+        redp2p_set_vip(ctx, "vip", err, sizeof(err)));
+    rc += expect_int("reject bad vip id", REDP2P_ERROR,
+        redp2p_set_vip(ctx, "bad:id pass", err, sizeof(err)));
+    rc += expect_int("reject bad vip pass", REDP2P_ERROR,
+        redp2p_set_vip(ctx, "vip bad`pass", err, sizeof(err)));
+    rc += expect_int("reject duplicate vip", REDP2P_ERROR,
+        redp2p_set_vip(ctx, "vip pass vip other", err, sizeof(err)));
+    redp2p_close(ctx);
     return rc == 0 ? 0 : 1;
 }
 
 /**
- * Tests rp2p_set_sweep.
+ * Tests redp2p_set_sweep.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_set_sweep(void) {
-    rp2p_t *ctx;
+static int case_redp2p_set_sweep(void) {
+    redp2p_t *ctx;
     int rc;
 
     rc = 0;
-    rc += expect_int("set sweep NULL", RP2P_EINVAL,
-        rp2p_set_sweep(NULL, 1));
-    rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
-    rc += expect_int("set sweep positive", RP2P_OK, rp2p_set_sweep(ctx, 10));
-    rc += expect_int("set sweep zero", RP2P_OK, rp2p_set_sweep(ctx, 0));
-    rp2p_close(ctx);
+    rc += expect_int("set sweep NULL", REDP2P_EINVAL,
+        redp2p_set_sweep(NULL, 1));
+    rc += expect_int("open context", REDP2P_OK, redp2p_open(&ctx));
+    rc += expect_int("set sweep positive", REDP2P_OK, redp2p_set_sweep(ctx, 10));
+    rc += expect_int("set sweep zero", REDP2P_OK, redp2p_set_sweep(ctx, 0));
+    redp2p_close(ctx);
     return rc == 0 ? 0 : 1;
 }
 
 /**
- * Tests rp2p_set_stun_url.
+ * Tests redp2p_set_stun_url.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_set_stun_url(void) {
-    rp2p_t *ctx;
+static int case_redp2p_set_stun_url(void) {
+    redp2p_t *ctx;
     int rc;
 
     rc = 0;
-    rc += expect_int("set stun NULL ctx", RP2P_ERROR,
-        rp2p_set_stun_url(NULL, "stun:example.com:3478"));
-    rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
-    rc += expect_int("set stun", RP2P_OK,
-        rp2p_set_stun_url(ctx, "stun:example.com:3478"));
-    rc += expect_int("clear stun", RP2P_OK, rp2p_set_stun_url(ctx, NULL));
-    rp2p_close(ctx);
+    rc += expect_int("set stun NULL ctx", REDP2P_ERROR,
+        redp2p_set_stun_url(NULL, "stun:example.com:3478"));
+    rc += expect_int("open context", REDP2P_OK, redp2p_open(&ctx));
+    rc += expect_int("set stun", REDP2P_OK,
+        redp2p_set_stun_url(ctx, "stun:example.com:3478"));
+    rc += expect_int("clear stun", REDP2P_OK, redp2p_set_stun_url(ctx, NULL));
+    redp2p_close(ctx);
     return rc == 0 ? 0 : 1;
 }
 
@@ -3414,33 +3414,33 @@ static int case_rp2p_set_stun_url(void) {
  * @return 0 on success, 1 on failure, 2 for an unknown case.
  */
 static int run_case(const char *name) {
-    if (strcmp(name, "rp2p_options_default") == 0) return case_rp2p_options_default();
-    if (strcmp(name, "rp2p_options_load_env") == 0) return case_rp2p_options_load_env();
-    if (strcmp(name, "rp2p_options_load_env_invalid") == 0) return case_rp2p_options_load_env_invalid();
-    if (strcmp(name, "rp2p_options_free") == 0) return case_rp2p_options_free();
-    if (strcmp(name, "rp2p_open") == 0) return case_rp2p_open();
-    if (strcmp(name, "rp2p_close") == 0) return case_rp2p_close();
-    if (strcmp(name, "rp2p_stop") == 0) return case_rp2p_stop();
-    if (strcmp(name, "rp2p_version") == 0) return case_rp2p_version();
-    if (strcmp(name, "rp2p_strerror") == 0) return case_rp2p_strerror();
-    if (strcmp(name, "rp2p_is_valid_id") == 0) return case_rp2p_is_valid_id();
-    if (strcmp(name, "rp2p_is_valid_pass_token") == 0) return case_rp2p_is_valid_pass_token();
-    if (strcmp(name, "rp2p_serve_index") == 0) return case_rp2p_serve_index();
-    if (strcmp(name, "rp2p_wait") == 0) return case_rp2p_wait();
-    if (strcmp(name, "rp2p_connect") == 0) return case_rp2p_connect();
-    if (strcmp(name, "rp2p_udp_tunnel") == 0) return case_rp2p_udp_tunnel();
-    if (strcmp(name, "rp2p_tcp_stream") == 0) return case_rp2p_tcp_stream();
-    if (strcmp(name, "rp2p_deregister") == 0) return case_rp2p_deregister();
-    if (strcmp(name, "rp2p_list_publishers") == 0) return case_rp2p_list_publishers();
-    if (strcmp(name, "rp2p_get_error") == 0) return case_rp2p_get_error();
-    if (strcmp(name, "rp2p_set_seats") == 0) return case_rp2p_set_seats();
-    if (strcmp(name, "rp2p_set_pow") == 0) return case_rp2p_set_pow();
-    if (strcmp(name, "rp2p_set_port") == 0) return case_rp2p_set_port();
-    if (strcmp(name, "rp2p_set_protocol") == 0) return case_rp2p_set_protocol();
-    if (strcmp(name, "rp2p_set_pass") == 0) return case_rp2p_set_pass();
-    if (strcmp(name, "rp2p_set_vip") == 0) return case_rp2p_set_vip();
-    if (strcmp(name, "rp2p_set_sweep") == 0) return case_rp2p_set_sweep();
-    if (strcmp(name, "rp2p_set_stun_url") == 0) return case_rp2p_set_stun_url();
+    if (strcmp(name, "redp2p_options_default") == 0) return case_redp2p_options_default();
+    if (strcmp(name, "redp2p_options_load_env") == 0) return case_redp2p_options_load_env();
+    if (strcmp(name, "redp2p_options_load_env_invalid") == 0) return case_redp2p_options_load_env_invalid();
+    if (strcmp(name, "redp2p_options_free") == 0) return case_redp2p_options_free();
+    if (strcmp(name, "redp2p_open") == 0) return case_redp2p_open();
+    if (strcmp(name, "redp2p_close") == 0) return case_redp2p_close();
+    if (strcmp(name, "redp2p_stop") == 0) return case_redp2p_stop();
+    if (strcmp(name, "redp2p_version") == 0) return case_redp2p_version();
+    if (strcmp(name, "redp2p_strerror") == 0) return case_redp2p_strerror();
+    if (strcmp(name, "redp2p_is_valid_id") == 0) return case_redp2p_is_valid_id();
+    if (strcmp(name, "redp2p_is_valid_pass_token") == 0) return case_redp2p_is_valid_pass_token();
+    if (strcmp(name, "redp2p_serve_index") == 0) return case_redp2p_serve_index();
+    if (strcmp(name, "redp2p_wait") == 0) return case_redp2p_wait();
+    if (strcmp(name, "redp2p_connect") == 0) return case_redp2p_connect();
+    if (strcmp(name, "redp2p_udp_tunnel") == 0) return case_redp2p_udp_tunnel();
+    if (strcmp(name, "redp2p_tcp_stream") == 0) return case_redp2p_tcp_stream();
+    if (strcmp(name, "redp2p_deregister") == 0) return case_redp2p_deregister();
+    if (strcmp(name, "redp2p_list_publishers") == 0) return case_redp2p_list_publishers();
+    if (strcmp(name, "redp2p_get_error") == 0) return case_redp2p_get_error();
+    if (strcmp(name, "redp2p_set_seats") == 0) return case_redp2p_set_seats();
+    if (strcmp(name, "redp2p_set_pow") == 0) return case_redp2p_set_pow();
+    if (strcmp(name, "redp2p_set_port") == 0) return case_redp2p_set_port();
+    if (strcmp(name, "redp2p_set_protocol") == 0) return case_redp2p_set_protocol();
+    if (strcmp(name, "redp2p_set_pass") == 0) return case_redp2p_set_pass();
+    if (strcmp(name, "redp2p_set_vip") == 0) return case_redp2p_set_vip();
+    if (strcmp(name, "redp2p_set_sweep") == 0) return case_redp2p_set_sweep();
+    if (strcmp(name, "redp2p_set_stun_url") == 0) return case_redp2p_set_stun_url();
     fprintf(stderr, "unknown test case: %s\n", name);
     return 2;
 }

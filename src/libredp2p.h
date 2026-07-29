@@ -1,5 +1,5 @@
 /**
- * rp2p.h - RedP2P.
+ * libredp2p.h - REDP2P.
  * Summary: Public API for TCP rendezvous control and direct peer UDP transport.
  *
  * Author:  KaisarCode
@@ -7,8 +7,8 @@
  * License: https://www.gnu.org/licenses/gpl-3.0.html
  */
 
-#ifndef RP2P_H
-#define RP2P_H
+#ifndef REDP2P_H
+#define REDP2P_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -18,78 +18,78 @@
 extern "C" {
 #endif
 
-typedef struct rp2p rp2p_t;
+typedef struct redp2p redp2p_t;
 
-#define RP2P_OK          0
-#define RP2P_ERROR      -1
-#define RP2P_ENET       -2
-#define RP2P_ENOENT     -3
-#define RP2P_ETIMEOUT   -4
-#define RP2P_EFULL      -5
-#define RP2P_EINVAL     -6
-#define RP2P_EPROTO     -7
-#define RP2P_EAUTH      -8
-#define RP2P_EVERSION   -9
-#define RP2P_EPUNCH    -10
+#define REDP2P_OK          0
+#define REDP2P_ERROR      -1
+#define REDP2P_ENET       -2
+#define REDP2P_ENOENT     -3
+#define REDP2P_ETIMEOUT   -4
+#define REDP2P_EFULL      -5
+#define REDP2P_EINVAL     -6
+#define REDP2P_EPROTO     -7
+#define REDP2P_EAUTH      -8
+#define REDP2P_EVERSION   -9
+#define REDP2P_EPUNCH    -10
 
-#define RP2P_ID_MAX         63
-#define RP2P_ADDR_MAX       47
-#define RP2P_BUF          4096
-#define RP2P_PORT_DEFAULT  9876
-#define RP2P_HEARTBEAT_S     15
-#define RP2P_KEY_SZ          16
-#define RP2P_KEY_STR_SZ      33
-#define RP2P_PASS_MAX       255
-#define RP2P_UDP_PAYLOAD_MAX 1412
+#define REDP2P_ID_MAX         63
+#define REDP2P_ADDR_MAX       47
+#define REDP2P_BUF          4096
+#define REDP2P_PORT_DEFAULT  9876
+#define REDP2P_HEARTBEAT_S     15
+#define REDP2P_KEY_SZ          16
+#define REDP2P_KEY_STR_SZ      33
+#define REDP2P_PASS_MAX       255
+#define REDP2P_UDP_PAYLOAD_MAX 1412
 
-#define RP2P_PROTO_TCP 1
-#define RP2P_PROTO_UDP 2
+#define REDP2P_PROTO_TCP 1
+#define REDP2P_PROTO_UDP 2
 
-#define RP2P_STUN_MAGIC 0x2112A442
-#define RP2P_STUN_ATTR_MAPPED_ADDR     0x0001
-#define RP2P_STUN_ATTR_XOR_MAPPED_ADDR 0x0020
-#define RP2P_STUN_BINDING      0x0001
-#define RP2P_STUN_BINDING_RESP 0x0101
+#define REDP2P_STUN_MAGIC 0x2112A442
+#define REDP2P_STUN_ATTR_MAPPED_ADDR     0x0001
+#define REDP2P_STUN_ATTR_XOR_MAPPED_ADDR 0x0020
+#define REDP2P_STUN_BINDING      0x0001
+#define REDP2P_STUN_BINDING_RESP 0x0101
 
-typedef struct rp2p_options {
+typedef struct redp2p_options {
     size_t seats;
     int pow;
-    char pass[RP2P_PASS_MAX + 1];
+    char pass[REDP2P_PASS_MAX + 1];
     char *vip;
     int sweep;
     char stun_url[256];
-} rp2p_options_t;
+} redp2p_options_t;
 
 typedef struct {
-    char id[RP2P_ID_MAX + 1];
-    char key[RP2P_KEY_STR_SZ];
+    char id[REDP2P_ID_MAX + 1];
+    char key[REDP2P_KEY_STR_SZ];
     time_t last_seen;
-} rp2p_peer_t;
+} redp2p_peer_t;
 
 /**
  * Candidate transport class.
  * Summary: Ranks direct candidates before public or observed candidates.
  */
 typedef enum {
-    RP2P_CAND_HOST = 1,
-    RP2P_CAND_LAN,
-    RP2P_CAND_PUBLIC,
-    RP2P_CAND_SRFLX,
-    RP2P_CAND_PRFLX,
-    RP2P_CAND_PREDICTED,
-    RP2P_CAND_PROXY
-} rp2p_candidate_type_t;
+    REDP2P_CAND_HOST = 1,
+    REDP2P_CAND_LAN,
+    REDP2P_CAND_PUBLIC,
+    REDP2P_CAND_SRFLX,
+    REDP2P_CAND_PRFLX,
+    REDP2P_CAND_PREDICTED,
+    REDP2P_CAND_PROXY
+} redp2p_candidate_type_t;
 
 /**
  * Candidate endpoint exchanged through the TCP rendezvous control channel.
  * Summary: The priority is local-only and is recomputed after parsing.
  */
 typedef struct {
-    rp2p_candidate_type_t type;
-    char addr[RP2P_ADDR_MAX + 1];
+    redp2p_candidate_type_t type;
+    char addr[REDP2P_ADDR_MAX + 1];
     unsigned short port;
     unsigned int priority;
-} rp2p_candidate_t;
+} redp2p_candidate_t;
 
 /**
  * Publisher listing callback.
@@ -97,7 +97,7 @@ typedef struct {
  * @param userdata Caller-owned pointer passed through unchanged.
  * @return None.
  */
-typedef void (*rp2p_publisher_cb)(
+typedef void (*redp2p_publisher_cb)(
 const char *id,
 void *userdata
 );
@@ -106,42 +106,42 @@ void *userdata
  * Returns initialized caller-owned runtime options.
  * @return Options value with documented defaults.
  */
-rp2p_options_t rp2p_options_default(void);
+redp2p_options_t redp2p_options_default(void);
 
 /**
- * Loads publisher or consumer RP2P environment settings into options.
- * @param opts Caller-owned options initialized by rp2p_options_default.
+ * Loads publisher or consumer REDP2P environment settings into options.
+ * @param opts Caller-owned options initialized by redp2p_options_default.
  * @return None.
  */
-void rp2p_options_load_env(rp2p_options_t *opts);
+void redp2p_options_load_env(redp2p_options_t *opts);
 
 /**
  * Releases allocations owned by one options value.
  * @param opts Caller-owned options value.
  * @return None.
  */
-void rp2p_options_free(rp2p_options_t *opts);
+void redp2p_options_free(redp2p_options_t *opts);
 
 /**
- * Allocates one independent RP2P context.
+ * Allocates one independent REDP2P context.
  * @param out Receives the caller-owned context.
- * @return RP2P_OK on success or RP2P_ERROR on allocation failure.
+ * @return REDP2P_OK on success or REDP2P_ERROR on allocation failure.
  */
-int rp2p_open(rp2p_t **out);
+int redp2p_open(redp2p_t **out);
 
 /**
  * Closes descriptors, wipes session state, and releases one context.
- * @param ctx Context returned by rp2p_open.
- * @return RP2P_OK on success or RP2P_ERROR for NULL.
+ * @param ctx Context returned by redp2p_open.
+ * @return REDP2P_OK on success or REDP2P_ERROR for NULL.
  */
-int rp2p_close(rp2p_t *ctx);
+int redp2p_close(redp2p_t *ctx);
 
 /**
  * Request clean termination for the current blocking operation on one context.
  * @param ctx Context to stop.
- * @return RP2P_OK on success or RP2P_EINVAL for NULL.
+ * @return REDP2P_OK on success or REDP2P_EINVAL for NULL.
  */
-int rp2p_stop(rp2p_t *ctx);
+int redp2p_stop(redp2p_t *ctx);
 
 /**
  * Checks whether one context was requested to stop.
@@ -149,41 +149,41 @@ int rp2p_stop(rp2p_t *ctx);
  * @param ctx Context to query.
  * @return Nonzero if a stop was requested, zero otherwise.
  */
-int rp2p_stop_requested(rp2p_t *ctx);
+int redp2p_stop_requested(redp2p_t *ctx);
 
 /**
  * Returns the build version generated at compile time.
  * @return Unix timestamp for the current build.
  */
-uint64_t rp2p_version(void);
+uint64_t redp2p_version(void);
 
 /**
- * Returns a stable static description for one RP2P status category.
- * @param code RP2P status code.
+ * Returns a stable static description for one REDP2P status category.
+ * @param code REDP2P status code.
  * @return Static string requiring no release.
  */
-const char *rp2p_strerror(int code);
+const char *redp2p_strerror(int code);
 
 /**
  * Returns the last per-context detail error message.
  * @param ctx Context to query.
  * @return Context-owned string valid until the next update or context close.
  */
-const char *rp2p_get_error(rp2p_t *ctx);
+const char *redp2p_get_error(redp2p_t *ctx);
 
 /**
  * Validates one ASCII service identifier.
  * @param id Identifier to validate.
  * @return 1 when valid, 0 otherwise.
  */
-int rp2p_is_valid_id(const char *id);
+int redp2p_is_valid_id(const char *id);
 
 /**
  * Validates one terminal-safe password token.
  * @param pass Token to validate.
  * @return 1 when valid, 0 otherwise.
  */
-int rp2p_is_valid_pass_token(const char *pass);
+int redp2p_is_valid_pass_token(const char *pass);
 
 /**
  * INDEX SERVER
@@ -192,8 +192,8 @@ int rp2p_is_valid_pass_token(const char *pass);
  * Never returns on success.
  * @return Negative error code on setup failure.
  */
-int rp2p_serve_index(
-rp2p_t *ctx,
+int redp2p_serve_index(
+redp2p_t *ctx,
 const char *host,
 unsigned short port
 );
@@ -203,10 +203,10 @@ unsigned short port
  * Connects to the index over TCP, REGISTERs, and waits for PUNCH_CALL2
  * requests over the same TCP connection. Creates one backend session
  * per connecting client.
- * @return RP2P_OK on clean exit, or a negative error code.
+ * @return REDP2P_OK on clean exit, or a negative error code.
  */
-int rp2p_wait(
-rp2p_t *ctx,
+int redp2p_wait(
+redp2p_t *ctx,
 const char *index_host,
 unsigned short index_port,
 const char *self_id,
@@ -219,10 +219,10 @@ unsigned short bind_port
  * over direct UDP, creates a local TCP listener and uses a direct peer UDP
  * path for the reliable stream. For UDP datagram forwarding, creates
  * a UDP socket and hole-punches directly to the publisher.
- * @return RP2P_OK on clean exit, or a negative error code.
+ * @return REDP2P_OK on clean exit, or a negative error code.
  */
-int rp2p_connect(
-rp2p_t *ctx,
+int redp2p_connect(
+redp2p_t *ctx,
 const char *index_host,
 unsigned short index_port,
 const char *self_id,
@@ -232,11 +232,11 @@ unsigned short bind_port
 
 /**
  * CLIENT: Deregister from an index server over TCP.
- * Used by `rp2p del` and internally on shutdown.
- * @return RP2P_OK on success, or a negative error code.
+ * Used by `redp2p del` and internally on shutdown.
+ * @return REDP2P_OK on success, or a negative error code.
  */
-int rp2p_deregister(
-rp2p_t *ctx,
+int redp2p_deregister(
+redp2p_t *ctx,
 const char *index_host,
 unsigned short index_port,
 const char *id
@@ -245,13 +245,13 @@ const char *id
 /**
  * CLIENT: List publishers registered in an index server over TCP.
  * Calls cb once for each active publisher id returned by the index.
- * @return RP2P_OK on success, or a negative error code.
+ * @return REDP2P_OK on success, or a negative error code.
  */
-int rp2p_list_publishers(
-rp2p_t *ctx,
+int redp2p_list_publishers(
+redp2p_t *ctx,
 const char *index_host,
 unsigned short index_port,
-rp2p_publisher_cb cb,
+redp2p_publisher_cb cb,
 void *userdata
 );
 
@@ -259,40 +259,40 @@ void *userdata
  * Sets the number of index publisher seats.
  * @param ctx Open context.
  * @param seats Total publisher seats; VIP reservations count toward the total.
- * @return RP2P_OK or RP2P_EINVAL.
+ * @return REDP2P_OK or REDP2P_EINVAL.
  */
-int rp2p_set_seats(rp2p_t *ctx, size_t seats);
+int redp2p_set_seats(redp2p_t *ctx, size_t seats);
 
 /**
  * Sets registration proof difficulty.
- * @return RP2P_OK or RP2P_EINVAL.
+ * @return REDP2P_OK or REDP2P_EINVAL.
  */
-int rp2p_set_pow(rp2p_t *ctx, int bits);
+int redp2p_set_pow(redp2p_t *ctx, int bits);
 
 /**
  * Sets the local nonzero service port.
- * @return RP2P_OK or RP2P_EINVAL.
+ * @return REDP2P_OK or REDP2P_EINVAL.
  */
-int rp2p_set_port(rp2p_t *ctx, unsigned short port);
+int redp2p_set_port(redp2p_t *ctx, unsigned short port);
 
 /**
  * Selects TCP or UDP edge transport.
- * @return RP2P_OK or RP2P_EINVAL.
+ * @return REDP2P_OK or REDP2P_EINVAL.
  */
-int rp2p_set_protocol(rp2p_t *ctx, int proto);
+int redp2p_set_protocol(redp2p_t *ctx, int proto);
 
 /**
  * Sets publisher registration protection.
- * @return RP2P_OK or RP2P_EINVAL.
+ * @return REDP2P_OK or REDP2P_EINVAL.
  */
-int rp2p_set_pass(rp2p_t *ctx, const char *pass);
+int redp2p_set_pass(redp2p_t *ctx, const char *pass);
 
 /**
  * Sets reserved publisher IDs and registration passwords.
- * @return RP2P_OK or a negative error category.
+ * @return REDP2P_OK or a negative error category.
  */
-int rp2p_set_vip(
-rp2p_t *ctx,
+int redp2p_set_vip(
+redp2p_t *ctx,
 const char *vip,
 char *err,
 size_t err_cap
@@ -300,19 +300,19 @@ size_t err_cap
 
 /**
  * Sets the bounded direct-punch port sweep range.
- * @return RP2P_OK or RP2P_EINVAL.
+ * @return REDP2P_OK or REDP2P_EINVAL.
  */
-int rp2p_set_sweep(
-rp2p_t *ctx,
+int redp2p_set_sweep(
+redp2p_t *ctx,
 int sweep
 );
 
 /**
  * Sets or disables the optional STUN discovery URL.
- * @return RP2P_OK or a negative error category.
+ * @return REDP2P_OK or a negative error category.
  */
-int rp2p_set_stun_url(
-rp2p_t *ctx,
+int redp2p_set_stun_url(
+redp2p_t *ctx,
 const char *url
 );
 

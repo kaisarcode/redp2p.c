@@ -1,28 +1,28 @@
-# rp2p.c Design
+# redp2p.c Design
 
 ## Motivation
 
 Modern networking software is commonly designed around managed cloud infrastructure, permanent hosted services, large organizations, and recurring operational payments. Those systems already have many mature tools available to them.
 
-RP2P is intended for a different operating model.
+REDP2P is intended for a different operating model.
 
 Its users may be a neighborhood business, a social club, a community project, a group of friends, or one person operating personal infrastructure. They may need mobile and desktop applications to exchange data, expose a local service, interconnect a small user base, or run a game server without sharing a LAN or paying for a permanent traffic relay.
 
-The project owner is also the operator and integrator. Deployments are known, concrete, and small. RP2P therefore does not need to anticipate every authentication model, trust relationship, storage design, or business rule that a future platform might require.
+The project owner is also the operator and integrator. Deployments are known, concrete, and small. REDP2P therefore does not need to anticipate every authentication model, trust relationship, storage design, or business rule that a future platform might require.
 
-The only shared problem RP2P solves is connectivity: coordinating peers and transporting TCP streams or UDP datagrams directly between them.
+The only shared problem REDP2P solves is connectivity: coordinating peers and transporting TCP streams or UDP datagrams directly between them.
 
-Application-specific concerns remain with the application using the component. A club, business, game, or community system may define its own users, authentication, authorization, encryption, persistence, discovery, and trust model without forcing those choices into every other RP2P deployment.
+Application-specific concerns remain with the application using the component. A club, business, game, or community system may define its own users, authentication, authorization, encryption, persistence, discovery, and trust model without forcing those choices into every other REDP2P deployment.
 
 This separation also preserves the project's economic and operational model. Because application traffic does not pass through the index, an index can remain inexpensive and replaceable. It may run on a modest VPS, a home system, a single-board computer, or even a smartphone whenever an accessible public address is available.
 
 Small scale is not a temporary stage before enterprise growth. It is the intended destination. Limited resource use, low operational cost, direct ownership, and code that one person can inspect are product requirements.
 
-Features must not be added merely because they are common in commercial networking platforms or might be useful someday. Functionality that belongs to one implementation should be built or composed outside RP2P.
+Features must not be added merely because they are common in commercial networking platforms or might be useful someday. Functionality that belongs to one implementation should be built or composed outside REDP2P.
 
 ## Purpose
 
-`rp2p.c` is a small tunneling primitive for independently operated systems.
+`redp2p.c` is a small tunneling primitive for independently operated systems.
 
 It allows one peer to publish a local TCP or UDP service and another peer to expose that service through a local port.
 
@@ -34,7 +34,7 @@ The project is not designed as an enterprise networking platform, managed connec
 
 ## Architecture
 
-RP2P separates coordination from application transport.
+REDP2P separates coordination from application transport.
 
 The index is a TCP-only control service.
 
@@ -65,9 +65,9 @@ Application traffic travels directly between peers through UDP.
 
 ### TCP mode
 
-The local application communicates with RP2P through TCP.
+The local application communicates with REDP2P through TCP.
 
-RP2P transports the byte stream between peers using vendored KCP over UDP.
+REDP2P transports the byte stream between peers using vendored KCP over UDP.
 
 KCP provides:
 
@@ -77,7 +77,7 @@ KCP provides:
 * congestion and window state
 * stream reconstruction
 
-RP2P adds only the session lifecycle envelope required around KCP:
+REDP2P adds only the session lifecycle envelope required around KCP:
 
 * `HELLO`
 * `HELLO_ACK`
@@ -87,7 +87,7 @@ RP2P adds only the session lifecycle envelope required around KCP:
 * `RESET`
 * `KEEPALIVE`
 
-RP2P must not implement a second reliable transport layer around KCP.
+REDP2P must not implement a second reliable transport layer around KCP.
 
 ### UDP mode
 
@@ -95,7 +95,7 @@ UDP datagrams are transported directly between peers.
 
 Datagram boundaries are preserved.
 
-RP2P does not add:
+REDP2P does not add:
 
 * ordering
 * retransmission
@@ -106,7 +106,7 @@ Applications using UDP remain responsible for their own delivery semantics.
 
 ## Direct Connectivity
 
-RP2P attempts to establish a direct UDP path between peers.
+REDP2P attempts to establish a direct UDP path between peers.
 
 Candidate sources may include:
 
@@ -118,7 +118,7 @@ STUN is optional.
 
 STUN is used only to discover an externally visible endpoint. It does not carry application traffic and does not become part of an established tunnel.
 
-RP2P does not implement TURN or any equivalent application traffic relay.
+REDP2P does not implement TURN or any equivalent application traffic relay.
 
 The current control protocol accepts only `host`, `lan`, `public`, and `srflx` candidate records. It validates literal IPv4 or IPv6 addresses, removes duplicate endpoints, recomputes local priority, and attempts candidates in deterministic priority order. The implementation does not currently generate `public`, peer-reflexive, predicted, or proxy candidate records.
 
@@ -130,7 +130,7 @@ This is an accepted operational result. It is not automatically missing function
 
 ## Security Boundaries
 
-RP2P transports application traffic without defining the application security model.
+REDP2P transports application traffic without defining the application security model.
 
 Application protocols remain responsible for:
 
@@ -142,13 +142,13 @@ Application protocols remain responsible for:
 * application identity
 * trust establishment
 
-Protocols such as SSH, HTTPS, TLS-enabled services, or application-specific secure protocols may run through RP2P without duplicating their security layer inside the tunnel.
+Protocols such as SSH, HTTPS, TLS-enabled services, or application-specific secure protocols may run through REDP2P without duplicating their security layer inside the tunnel.
 
 Plaintext application protocols may also be transported when the operator deliberately accepts that model.
 
 The index control protocol is not an application payload security layer.
 
-`RP2P_PASS`, `RP2P_VIP`, and proof-of-work protect publisher registration and index capacity. They do not authenticate consumers, establish peer identity, or encrypt transported payloads.
+`REDP2P_PASS`, `REDP2P_VIP`, and proof-of-work protect publisher registration and index capacity. They do not authenticate consumers, establish peer identity, or encrypt transported payloads.
 
 ## Registration Protection
 
@@ -179,7 +179,7 @@ The index stores only the state required to coordinate active publishers and pen
 
 It must not become a permanent source of truth.
 
-Publisher registration creates one narrow piece of local persistent state: a deregistration key under `$HOME/.local/share/rp2p/keys/`. Its filename is a SHA-256 scope over the index host, index port, and publisher ID. The key is written through a private temporary file, stored as mode `0600` on POSIX, and removed after successful deregistration. A publisher rolls back registration if the key cannot be stored.
+Publisher registration creates one narrow piece of local persistent state: a deregistration key under `$HOME/.local/share/redp2p/keys/`. Its filename is a SHA-256 scope over the index host, index port, and publisher ID. The key is written through a private temporary file, stored as mode `0600` on POSIX, and removed after successful deregistration. A publisher rolls back registration if the key cannot be stored.
 
 The key authorizes `del` for one registration scope. It is not user identity, peer identity, application authentication, or durable index state. A legacy identifier-named key may be read for migration, but new keys use scoped hashed filenames.
 
@@ -195,7 +195,7 @@ Databases, synchronized key stores, registration history, and persistent index s
 
 ## Composition
 
-RP2P should compose with existing tools and protocols rather than absorb their responsibilities.
+REDP2P should compose with existing tools and protocols rather than absorb their responsibilities.
 
 Examples:
 
@@ -206,7 +206,7 @@ Examples:
 * an external proxy may expose a local bridge.
 * separate applications may define users and permissions.
 
-A feature should not be added to RP2P merely because it is commonly bundled into larger networking platforms.
+A feature should not be added to REDP2P merely because it is commonly bundled into larger networking platforms.
 
 ## Portability
 
@@ -236,7 +236,7 @@ Design choices should prefer:
 * limited background threads
 * no mandatory external services
 
-Publisher storage grows dynamically as publishers become active. When `--seats` or `RP2P_SEATS` is configured, seats is the total publisher capacity. Each VIP reservation occupies one seat even while inactive, and non-VIP publishers use the remaining seats. Without either setting, no application-level publisher limit applies. Removing an active publisher releases its occupancy, while a VIP reservation remains reserved for that VIP.
+Publisher storage grows dynamically as publishers become active. When `--seats` or `REDP2P_SEATS` is configured, seats is the total publisher capacity. Each VIP reservation occupies one seat even while inactive, and non-VIP publishers use the remaining seats. Without either setting, no application-level publisher limit applies. Removing an active publisher releases its occupancy, while a VIP reservation remains reserved for that VIP.
 
 Active publisher and consumer session arrays and index control-connection storage grow with live descriptors and are constrained by `select()` representation rather than one fixed session count. They do not retain completed work. Unbounded queues, hidden history, and infrastructure-dependent behavior should be rejected.
 
@@ -244,7 +244,7 @@ Active publisher and consumer session arrays and index control-connection storag
 
 One person should be able to understand the complete connection path without learning a framework or navigating a distributed internal architecture.
 
-The implementation intentionally keeps reusable library behavior in one compilation unit: `src/librp2p.c`.
+The implementation intentionally keeps reusable library behavior in one compilation unit: `src/libredp2p.c`.
 
 This single-file structure is part of the kclib maintenance model. It keeps internal helpers `static`, avoids private cross-unit contracts, preserves local visibility of state and ownership, and allows the complete implementation path to be inspected in one place.
 
@@ -271,7 +271,7 @@ Generic extensibility remains outside the project goals.
 
 ## Non-goals
 
-RP2P is not intended to provide:
+REDP2P is not intended to provide:
 
 * enterprise network orchestration
 * universal connectivity
@@ -301,7 +301,7 @@ A proposed change should be evaluated with the following questions:
 2. Is the problem part of tunneling, or does it belong to another component?
 3. Can it be solved through composition with an existing small tool?
 4. Does it introduce permanent infrastructure?
-5. Does it move application responsibility into RP2P?
+5. Does it move application responsibility into REDP2P?
 6. Does it increase hidden state or operator dependency?
 7. Does it make the connection path harder for one person to inspect?
 8. Does it preserve direct peer-to-peer application traffic?
@@ -327,7 +327,7 @@ The following properties define the project:
 * local persisted state is limited to scoped deregistration keys
 * protocol and coordination resource limits remain explicit
 * the implementation remains small and inspectable
-* reusable library behavior remains in the single `src/librp2p.c` implementation unit unless the project owner explicitly changes the source-layout contract
+* reusable library behavior remains in the single `src/libredp2p.c` implementation unit unless the project owner explicitly changes the source-layout contract
 * local operation does not require accounts or subscriptions
 
 These constraints define the product.
