@@ -34,6 +34,13 @@ Start an index with proof-of-work registration cost:
 redp2p idx 9876 --pow 20
 ```
 
+List active publishers from a local index:
+
+```bash
+redp2p idx 9876 --list
+redp2p idx 9876 -l
+```
+
 Publish a local TCP service:
 
 ```bash
@@ -81,6 +88,7 @@ redp2p del web@idx.example.com:9876
 | `idx <port>`                           | Start an index server                         |
 | `idx <port> --seats <N>`               | Set total publisher seats to `N`               |
 | `idx <port> --pow <N>`                 | Set publisher registration proof-of-work cost |
+| `idx <port> --list`, `idx <port> -l`   | List active publishers from the local index   |
 | `pub <id>@<index[:port]> --tcp <port>` | Publish a local TCP service                   |
 | `pub <id>@<index[:port]> --udp <port>` | Publish a local UDP service                   |
 | `con <id>@<index[:port]> --tcp <port>` | Expose a remote TCP service locally           |
@@ -94,6 +102,8 @@ redp2p del web@idx.example.com:9876
 The identifier before `@` is an arbitrary service label registered in the selected index.
 
 IDs may contain ASCII letters and digits.
+
+Index list mode connects to `127.0.0.1:<port>` without starting a server and prints one active publisher ID per line. It cannot be combined with server options such as `--seats` or `--pow`.
 
 CLI flags override environment variables, which override built-in defaults.
 

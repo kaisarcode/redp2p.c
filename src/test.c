@@ -31,6 +31,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #endif
@@ -38,6 +39,10 @@
 #define TEST_HOST "127.0.0.1"
 #define TEST_TCP_CLIENTS 4
 #define TEST_TCP_LARGE_SIZE (80U * 1024U + 333U)
+
+#ifndef REDP2P_TEST_CLI
+#define REDP2P_TEST_CLI ""
+#endif
 
 #ifdef _WIN32
 typedef HANDLE test_thread_t;
@@ -919,6 +924,109 @@ static int expect_string(const char *name, const char *expected, const char *act
     printf("[PASS] %s\n", name);
     return 0;
 }
+
+#ifndef _WIN32
+/**
+ * Runs the REDP2P CLI and captures stdout.
+ * @param argv Command argument vector.
+ * @param output Destination output buffer.
+ * @param output_cap Output buffer capacity.
+ * @param output_size Destination captured byte count.
+ * @param exit_code Destination process exit code.
+ * @return 0 on success, 1 on failure.
+ */
+static int test_cli_capture(char *const argv[], char *output,
+    size_t output_cap, size_t *output_size, int *exit_code)
+{
+    int output_pipe[2];
+    pid_t pid;
+    size_t used;
+    int status;
+
+    if (!argv || !argv[0] || !output || output_cap == 0 || !output_size ||
+        !exit_code)
+        return 1;
+    if (pipe(output_pipe) != 0) return 1;
+    pid = fork();
+    if (pid < 0) {
+        close(output_pipe[0]);
+        close(output_pipe[1]);
+        return 1;
+    }
+    if (pid == 0) {
+        if (dup2(output_pipe[1], STDOUT_FILENO) < 0) _exit(127);
+        close(output_pipe[0]);
+        close(output_pipe[1]);
+        execv(argv[0], argv);
+        _exit(127);
+    }
+    close(output_pipe[1]);
+    used = 0;
+    while (used + 1 < output_cap) {
+        ssize_t count;
+
+        count = read(output_pipe[0], output + used, output_cap - used - 1);
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            close(output_pipe[0]);
+            waitpid(pid, NULL, 0);
+            return 1;
+        }
+        if (count == 0) break;
+        used += (size_t)count;
+    }
+    close(output_pipe[0]);
+    output[used] = '\0';
+    *output_size = used;
+    if (waitpid(pid, &status, 0) < 0 || !WIFEXITED(status)) return 1;
+    *exit_code = WEXITSTATUS(status);
+    return 0;
+}
+
+/**
+ * Runs one idx list CLI assertion.
+ * @param name Assertion name.
+ * @param port Local index port.
+ * @param list_option List option spelling.
+ * @param server_option Optional conflicting server option.
+ * @param server_value Optional conflicting server option value.
+ * @param expected_exit Expected process exit code.
+ * @param expected_output Expected stdout text.
+ * @return 0 on success, 1 on failure.
+ */
+static int test_cli_list(const char *name, unsigned short port,
+    const char *list_option, const char *server_option,
+    const char *server_value, int expected_exit, const char *expected_output)
+{
+    char output[256];
+    char port_text[6];
+    char *arguments[] = {
+        (char *)REDP2P_TEST_CLI,
+        (char *)"idx",
+        port_text,
+        (char *)list_option,
+        (char *)server_option,
+        (char *)server_value,
+        NULL,
+    };
+    size_t output_size;
+    int exit_code;
+    int rc;
+
+    snprintf(port_text, sizeof(port_text), "%u", (unsigned)port);
+    output[0] = '\0';
+    exit_code = -1;
+    if (test_cli_capture(arguments, output, sizeof(output), &output_size,
+        &exit_code) != 0)
+    {
+        printf("[FAIL] %s: failed to capture CLI\n", name);
+        return 1;
+    }
+    rc = expect_int(name, expected_exit, exit_code);
+    rc += expect_string(name, expected_output, output);
+    return rc == 0 ? 0 : 1;
+}
+#endif
 
 /**
  * Runs one loopback UDP echo backend until stopped.
@@ -3178,6 +3286,11 @@ static int case_redp2p_list_publishers(void) {
         redp2p_list_publishers(client, TEST_HOST, base, test_on_publisher, NULL));
     redp2p_close(client);
     if (test_index_start(&index, (unsigned short)(base + 1U)) != 0) return 1;
+#ifndef _WIN32
+    if (REDP2P_TEST_CLI[0])
+        rc += test_cli_list("empty CLI --list", (unsigned short)(base + 1U),
+            "--list", NULL, NULL, 0, "");
+#endif
     if (test_publisher_start(&publisher, "listed", (unsigned short)(base + 1U),
         (unsigned short)(base + 2U)) != 0) return 1;
     memset(&publishers, 0, sizeof(publishers));
@@ -3191,6 +3304,22 @@ static int case_redp2p_list_publishers(void) {
     rc += expect_string("successful list clears detail", "",
         redp2p_get_error(client));
     redp2p_close(client);
+#ifdef _WIN32
+    rc += expect_true("CLI publisher listing skipped on Windows", 1);
+#else
+    if (!REDP2P_TEST_CLI[0]) {
+        printf("[SKIP] CLI publisher listing fixture unavailable\n");
+    } else {
+        rc += test_cli_list("CLI --list", (unsigned short)(base + 1U),
+            "--list", NULL, NULL, 0, "listed\n");
+        rc += test_cli_list("CLI -l", (unsigned short)(base + 1U),
+            "-l", NULL, NULL, 0, "listed\n");
+        rc += test_cli_list("CLI list seats conflict",
+            (unsigned short)(base + 1U), "--list", "--seats", "1", 1, "");
+        rc += test_cli_list("CLI list pow conflict",
+            (unsigned short)(base + 1U), "-l", "--pow", "1", 1, "");
+    }
+#endif
     test_publisher_stop(&publisher);
     rc += expect_int("start original duplicate publisher", 0,
         test_publisher_start(&publisher, "duplicate",
@@ -3217,6 +3346,11 @@ static int case_redp2p_list_publishers(void) {
             strlen("REDP2P_CTRTOK_LOOKUP:duplicate\n"),
             "REDP2P_CTRTOK_NOT_FOUND"));
     test_index_stop(&index);
+#ifndef _WIN32
+    if (REDP2P_TEST_CLI[0])
+        rc += test_cli_list("unavailable CLI --list",
+            (unsigned short)(base + 1U), "--list", NULL, NULL, 1, "");
+#endif
     return rc == 0 ? 0 : 1;
 }
 

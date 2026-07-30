@@ -96,6 +96,16 @@ if(REDP2P_BUILD_TESTS)
     add_executable(redp2p_contract_test src/test.c)
     target_include_directories(redp2p_contract_test PRIVATE src)
     target_link_libraries(redp2p_contract_test PRIVATE ${REDP2P_TEST_SHARED_TARGET})
+    if(REDP2P_TEST_CLI)
+        set(REDP2P_TEST_CLI_TARGET_PATH "${REDP2P_TEST_CLI}")
+    elseif(TARGET redp2p)
+        set(REDP2P_TEST_CLI_TARGET_PATH "$<TARGET_FILE:redp2p>")
+    else()
+        set(REDP2P_TEST_CLI_TARGET_PATH "")
+    endif()
+    target_compile_definitions(redp2p_contract_test PRIVATE
+        REDP2P_TEST_CLI="${REDP2P_TEST_CLI_TARGET_PATH}"
+    )
 
     if(UNIX AND NOT ANDROID AND NOT APPLE)
         target_link_libraries(redp2p_contract_test PRIVATE pthread m)

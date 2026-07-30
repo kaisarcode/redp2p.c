@@ -241,7 +241,8 @@ static void print_help(const char *name) {
     printf("Usage: %s <command> [options]\n", name);
     printf("\n");
     printf("Commands:\n");
-    printf("  idx <port> [--seats <N>] [--pow <N>] Start index with publisher seats\n");
+    printf("  idx <port> [--seats <N>] [--pow <N>] Start index server\n");
+    printf("  idx <port> -l, --list                  List local index publishers\n");
     printf("  pub <host>@<index[:port]> --tcp <port> [--sweep <n>] [--stun <url>]\n");
     printf("  pub <host>@<index[:port]> --udp <port> [--sweep <n>] [--stun <url>]\n");
     printf("  del <host>@<index[:port]> Deregister from index\n");
@@ -257,6 +258,19 @@ static void print_help(const char *name) {
     printf("  REDP2P_STUN               Optional STUN URL (stun:host:port)\n");
     printf("  IDs may use only A-Z a-z 0-9\n");
     printf("  Passwords may use A-Z a-z 0-9 . _ - + = , : @ %% /\n");
+}
+
+/**
+ * Prints one publisher identifier to stdout.
+ * @param id Publisher identifier.
+ * @param userdata Output failure flag.
+ * @return None.
+ */
+static void print_publisher(const char *id, void *userdata) {
+    int *output_failed;
+
+    output_failed = (int *)userdata;
+    if (fprintf(stdout, "%s\n", id) < 0) *output_failed = 1;
 }
 
 /**
@@ -284,17 +298,30 @@ int main(int argc, char **argv) {
         char vip_err[256];
         size_t seats;
         int seats_set;
+        int seats_option_set;
         int pow_bits;
+        int pow_option_set;
+        int list_mode;
         int exit_code;
+        int output_failed;
+
+        list_mode = 0;
+        for (int i = 3; i < argc; i++) {
+            if (strcmp(argv[i], "--list") == 0 ||
+                strcmp(argv[i], "-l") == 0)
+                list_mode = 1;
+        }
 
         opts = redp2p_options_default();
         seats_set = 0;
-        if (load_index_options(&opts, &seats_set) != 0) {
+        if (!list_mode && load_index_options(&opts, &seats_set) != 0) {
             fprintf(stderr, "redp2p: failed to load index options\n");
             return 1;
         }
         seats = opts.seats;
         pow_bits = opts.pow;
+        seats_option_set = 0;
+        pow_option_set = 0;
 
         if (argc < 3) {
             fprintf(stderr, "redp2p: usage: %s idx <port>\n", argv[0]);
@@ -316,6 +343,7 @@ int main(int argc, char **argv) {
                     return 1;
                 }
                 seats_set = 1;
+                seats_option_set = 1;
             } else if (strcmp(argv[i], "--pow") == 0) {
                 long v;
                 if (i + 1 >= argc) { fprintf(stderr, "redp2p: --pow requires an argument\n"); redp2p_options_free(&opts); return 1; }
@@ -325,13 +353,40 @@ int main(int argc, char **argv) {
                     return 1;
                 }
                 pow_bits = (int)v;
+                pow_option_set = 1;
+            } else if (strcmp(argv[i], "--list") == 0 ||
+                strcmp(argv[i], "-l") == 0)
+            {
+                list_mode = 1;
             } else { fprintf(stderr, "redp2p: unknown option '%s'\n", argv[i]); redp2p_options_free(&opts); return 1; }
+        }
+
+        if (list_mode && (seats_option_set || pow_option_set)) {
+            fprintf(stderr,
+                "redp2p: --list cannot be combined with --seats or --pow\n");
+            redp2p_options_free(&opts);
+            return 1;
         }
 
         if (redp2p_open(&ctx) != REDP2P_OK) {
             fprintf(stderr, "redp2p: failed to create context\n");
             redp2p_options_free(&opts);
             return 1;
+        }
+        if (list_mode) {
+            output_failed = 0;
+            ret = redp2p_list_publishers(ctx, "127.0.0.1", port,
+                print_publisher, &output_failed);
+            if (ret != REDP2P_OK) {
+                fprintf(stderr, "redp2p: list failed: %s\n",
+                    redp2p_strerror(ret));
+            } else if (fflush(stdout) != 0 || output_failed) {
+                fprintf(stderr, "redp2p: failed to write publisher list\n");
+                ret = REDP2P_ERROR;
+            }
+            redp2p_close(ctx);
+            redp2p_options_free(&opts);
+            return ret == REDP2P_OK ? 0 : 1;
         }
         if (redp2p_set_pass(ctx, opts.pass) != REDP2P_OK) {
             fprintf(stderr, "redp2p: invalid REDP2P_PASS characters\n");
