@@ -225,6 +225,8 @@ if (redp2p_open(&ctx) == REDP2P_OK) {
 
 The `pub` and `con` commands run until interrupted with Ctrl+C (SIGINT) or SIGTERM, at which point they cleanly stop the publisher/consumer and close the index connection.
 
+The `pub` command also exits immediately if the index becomes unreachable or if network connectivity is lost. On exit, it prints `redp2p: pub exited: network error`. Applications wrapping a publisher should verify network availability before restarting.
+
 Default timing constants (overridable via environment):
 - Index eviction TTL: 120 seconds (`REDP2P_ETIMEOUT_SEC`)
 - Publisher heartbeat interval: 15 seconds (`REDP2P_HEARTBEAT_S`)

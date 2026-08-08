@@ -228,6 +228,23 @@ The publisher runtime maintains its own session table (`owned_sessions[]`) local
 
 This boundary keeps the index stateless and the project scope bounded. Consumer session tracking belongs to the transported application, not the coordination layer.
 
+## Publisher Lifecycle and Network Dependency
+
+A publisher process (`pub`) maintains its registration through periodic heartbeats to the index. If the index becomes unreachable or network connectivity is lost, the publisher exits immediately with `REDP2P_ENET` and stderr message `"network error"`.
+
+The publisher does not retry indefinitely. Two failure modes produce the same exit:
+
+- **Index unreachable:** the index process is stopped or the index host:port is unreachable.
+- **Internet down:** the local network interface changes or internet connectivity is lost.
+
+Applications wrapping a publisher must verify local network availability before restarting the publisher. If the publisher exits, the application should check connectivity independently:
+
+- If the index is reachable again, relaunch the publisher.
+- If the index remains unreachable and connectivity is confirmed, the index may be down.
+- If connectivity itself is unavailable, wait for the network to return before retrying.
+
+This separation keeps the publisher focused on tunnel coordination. Connection persistence and reconnection policy remain application responsibilities, composed externally. A separate small tool may check connectivity or supervise the publisher process.
+
 ## Composition
 
 REDP2P should compose with existing tools and protocols rather than absorb their responsibilities.
