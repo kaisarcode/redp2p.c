@@ -67,7 +67,7 @@ Application traffic travels directly between peers through UDP.
 The HTTP contract is a single endpoint dispatching on `op`:
 
 * `challenge` issues a random nonce and a difficulty; the server stores nothing.
-* `register` validates the id, optional password, and proof of work, enforces seats/VIP capacity, and upserts a publisher record with a deregistration key.
+* `register` validates the id, proof of work, and optional server-configured shared secret, enforces seats/VIP capacity, and upserts a publisher record with a deregistration key.
 * `heartbeat` authenticates with the deregistration key only (no proof of work) and refreshes `last_seen` and the endpoint fields.
 * `lookup` and `list` return fresh records, filtering expired ones without writing.
 * `deregister` removes a record only when the stored key matches.
@@ -167,7 +167,7 @@ Plaintext application protocols may also be transported when the operator delibe
 
 The index HTTP control API is not an application payload security layer.
 
-`REDP2P_PASS`, `REDP2P_VIP`, and proof-of-work protect publisher registration and index capacity. They do not authenticate consumers, establish peer identity, or encrypt transported payloads.
+`REDP2P_PASS`, `REDP2P_VIP`, and proof-of-work protect publisher registration and index capacity. The shared secret (`REDP2P_PASS` global or `REDP2P_VIP` per-ID) is configured by the index operator and distributed out-of-band to authorized publishers; it never travels on the wire. They do not authenticate consumers, establish peer identity, or encrypt transported payloads.
 
 ## Registration Protection
 
@@ -175,8 +175,8 @@ A public index may allow open registration.
 
 Optional controls include:
 
-* global publisher password
-* reserved publisher IDs with individual passwords
+* global shared secret (`REDP2P_PASS`)
+* reserved publisher IDs with individual shared secrets (`REDP2P_VIP`)
 * proof-of-work registration cost
 * optional operator-configured publisher capacity
 
