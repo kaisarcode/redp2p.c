@@ -184,6 +184,7 @@ static int redp2p_parse_size(const char *text, size_t *out) {
 #define REDP2P_PENDING_ANSWER_TTL_S  30
 #define REDP2P_POW_CHALLENGES_MAX   256
 #define REDP2P_POW_CHALLENGE_TTL_S   120
+#define REDP2P_PRUNE_INTERVAL_S      60
 #define REDP2P_MAX_CONNECTIONS      128
 #define REDP2P_STREAM_MAGIC             0x50434b52u
 #define REDP2P_STREAM_VERSION           2u
@@ -752,6 +753,7 @@ struct redp2p {
     char err_buf[256];
     int fault_drop_counter;
     int fault_reorder_counter;
+    unsigned long prune_interval_s;
     redp2p_pending_call_t pending_calls[REDP2P_MAX_PENDING_CALLS];
     int n_pending_calls;
     _Atomic int stop_requested;
@@ -2679,6 +2681,15 @@ int redp2p_open(redp2p_t **out) {
     ctx->n_conns = 0;
     ctx->conns_cap = 0;
     ctx->n_pending_calls = 0;
+    ctx->prune_interval_s = REDP2P_PRUNE_INTERVAL_S;
+    {
+        const char *env = getenv("REDP2P_PRUNE_INTERVAL_S");
+        if (env) {
+            long v = 0;
+            if (redp2p_parse_u(env, 1, 3600, &v) == REDP2P_OK)
+                ctx->prune_interval_s = (unsigned long)v;
+        }
+    }
     ctx->stop_requested = 0;
 #ifdef _WIN32
     InitializeCriticalSection(&ctx->mutex);
@@ -5264,7 +5275,7 @@ static int redp2p_index_event_loop(redp2p_index_runtime_t *runtime) {
         }
         if (ready_count == 0) {
             uint64_t now = redp2p_now_s();
-            if (now - runtime->last_prune >= 60) {
+            if (now - runtime->last_prune >= runtime->ctx->prune_interval_s) {
                 redp2p_lock(runtime->ctx);
                 redp2p_evict_stale(runtime->ctx);
                 redp2p_unlock(runtime->ctx);
