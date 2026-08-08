@@ -116,6 +116,10 @@ REDP2P_POW
 REDP2P_SEATS
 REDP2P_SWEEP
 REDP2P_STUN
+REDP2P_PRUNE_INTERVAL_S
+REDP2P_ETIMEOUT_SEC
+REDP2P_HEARTBEAT_S
+REDP2P_PUNCH_POLL_MS
 ```
 
 `REDP2P_PASS`, `REDP2P_VIP`, and proof-of-work protect publisher registration and index capacity.
@@ -218,6 +222,13 @@ if (redp2p_open(&ctx) == REDP2P_OK) {
 * `redp2p_list_publishers()` lists active publisher IDs.
 * `redp2p_stop()` requests termination of a blocking operation.
 * `redp2p_close()` releases the context and associated resources.
+
+The `pub` and `con` commands run until interrupted with Ctrl+C (SIGINT) or SIGTERM, at which point they cleanly stop the publisher/consumer and close the index connection.
+
+Default timing constants (overridable via environment):
+- Index eviction TTL: 120 seconds (`REDP2P_ETIMEOUT_SEC`)
+- Publisher heartbeat interval: 15 seconds (`REDP2P_HEARTBEAT_S`)
+- Publisher punch poll cadence: 500 ms (`REDP2P_PUNCH_POLL_MS`)
 
 See `DESIGN.md` for protocol boundaries and architectural invariants.
 

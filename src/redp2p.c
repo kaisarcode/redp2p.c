@@ -313,7 +313,7 @@ int main(int argc, char **argv) {
 
     if (strcmp(argv[1], "idx") == 0) {
         redp2p_options_t opts;
-        unsigned short port;
+        unsigned short port = 0;
         char vip_err[256];
         size_t seats;
         int seats_set;
@@ -327,39 +327,22 @@ int main(int argc, char **argv) {
 
         list_mode = 0;
         prune_mode = 0;
-        for (int i = 3; i < argc; i++) {
-            if (strcmp(argv[i], "--list") == 0 ||
-                strcmp(argv[i], "-l") == 0)
-                list_mode = 1;
-            else if (strcmp(argv[i], "--prune") == 0 ||
-                strcmp(argv[i], "-p") == 0)
-                prune_mode = 1;
-        }
-
-        opts = redp2p_options_default();
         seats_set = 0;
-        if (!list_mode && load_index_options(&opts, &seats_set) != 0) {
-            fprintf(stderr, "redp2p: failed to load index options\n");
-            return 1;
-        }
-        seats = opts.seats;
-        pow_bits = opts.pow;
         seats_option_set = 0;
         pow_option_set = 0;
+        seats = 0;
+        pow_bits = 0;
 
-        if (argc < 3) {
-            fprintf(stderr, "redp2p: usage: %s idx <port>\n", argv[0]);
-            redp2p_options_free(&opts);
-            return 1;
-        }
-        if (parse_port(argv[2], &port) != 0) {
-            fprintf(stderr, "redp2p: invalid port '%s'\n", argv[2]);
-            redp2p_options_free(&opts);
-            return 1;
-        }
+        opts = redp2p_options_default();
+        seats = opts.seats;
+        pow_bits = opts.pow;
 
-        for (int i = 3; i < argc; i++) {
-            if (strcmp(argv[i], "--seats") == 0) {
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--list") == 0 || strcmp(argv[i], "-l") == 0) {
+                list_mode = 1;
+            } else if (strcmp(argv[i], "--prune") == 0 || strcmp(argv[i], "-p") == 0) {
+                prune_mode = 1;
+            } else if (strcmp(argv[i], "--seats") == 0) {
                 if (i + 1 >= argc) { fprintf(stderr, "redp2p: --seats requires an argument\n"); redp2p_options_free(&opts); return 1; }
                 if (parse_size(argv[++i], &seats) != 0) {
                     fprintf(stderr, "redp2p: invalid --seats '%s'\n", argv[i]);
@@ -378,15 +361,24 @@ int main(int argc, char **argv) {
                 }
                 pow_bits = (int)v;
                 pow_option_set = 1;
-            } else if (strcmp(argv[i], "--list") == 0 ||
-                strcmp(argv[i], "-l") == 0)
-            {
-                list_mode = 1;
-            } else if (strcmp(argv[i], "--prune") == 0 ||
-                strcmp(argv[i], "-p") == 0)
-            {
-                prune_mode = 1;
-            } else { fprintf(stderr, "redp2p: unknown option '%s'\n", argv[i]); redp2p_options_free(&opts); return 1; }
+            } else if (port == 0 && parse_port(argv[i], &port) == 0) {
+            } else {
+                fprintf(stderr, "redp2p: unknown option '%s'\n", argv[i]);
+                redp2p_options_free(&opts);
+                return 1;
+            }
+        }
+
+        if (port == 0) {
+            fprintf(stderr, "redp2p: usage: %s idx <port> [--list|-l] [--prune|-p] [--seats N] [--pow N]\n", argv[0]);
+            redp2p_options_free(&opts);
+            return 1;
+        }
+
+        if (load_index_options(&opts, &seats_set) != 0) {
+            fprintf(stderr, "redp2p: failed to load index options\n");
+            redp2p_options_free(&opts);
+            return 1;
         }
 
         if (list_mode && (seats_option_set || pow_option_set)) {
