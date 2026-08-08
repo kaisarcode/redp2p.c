@@ -71,9 +71,10 @@ The HTTP contract is a single endpoint dispatching on `op`:
 * `heartbeat` authenticates with the deregistration key only (no proof of work) and refreshes `last_seen` and the endpoint fields.
 * `lookup` and `list` return fresh records, filtering expired ones without writing.
 * `deregister` removes a record only when the stored key matches.
-* `prune` physically removes expired records; it is meant for cron or an internal timer.
 * `punch_req` stores a bounded pending call for a target publisher id.
 * `punch_poll` returns and consumes the pending calls addressed to a publisher.
+
+Expired records are filtered from `lookup` and `list` responses. Physical removal runs automatically every 60 seconds in the index event loop. The CLI `redp2p idx <port> --prune` reports this behavior and does not expose an HTTP endpoint.
 
 Proof of work is paid at registration events only; heartbeats never carry nonce, solution, or proof. A quiet publisher becomes an expired record, not a disconnection event, and must `register` again after expiry.
 

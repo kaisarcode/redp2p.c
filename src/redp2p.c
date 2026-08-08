@@ -241,8 +241,9 @@ static void print_help(const char *name) {
     printf("Usage: %s <command> [options]\n", name);
     printf("\n");
     printf("Commands:\n");
-    printf("  idx <port> [--seats <N>] [--pow <N>] Start index server\n");
-    printf("  idx <port> -l, --list                  List local index publishers\n");
+printf("  idx <port> [--seats <N>] [--pow <N>] Start index server\n");
+printf("  idx <port> -l, --list                  List local index publishers\n");
+printf("  idx <port> -p, --prune                 Prune expired index records\n");
     printf("  pub <host>@<index[:port]> --tcp <port> [--sweep <n>] [--stun <url>]\n");
     printf("  pub <host>@<index[:port]> --udp <port> [--sweep <n>] [--stun <url>]\n");
     printf("  del <host>@<index[:port]> Deregister from index\n");
@@ -302,14 +303,19 @@ int main(int argc, char **argv) {
         int pow_bits;
         int pow_option_set;
         int list_mode;
+        int prune_mode;
         int exit_code;
         int output_failed;
 
         list_mode = 0;
+        prune_mode = 0;
         for (int i = 3; i < argc; i++) {
             if (strcmp(argv[i], "--list") == 0 ||
                 strcmp(argv[i], "-l") == 0)
                 list_mode = 1;
+            else if (strcmp(argv[i], "--prune") == 0 ||
+                strcmp(argv[i], "-p") == 0)
+                prune_mode = 1;
         }
 
         opts = redp2p_options_default();
@@ -358,12 +364,22 @@ int main(int argc, char **argv) {
                 strcmp(argv[i], "-l") == 0)
             {
                 list_mode = 1;
+            } else if (strcmp(argv[i], "--prune") == 0 ||
+                strcmp(argv[i], "-p") == 0)
+            {
+                prune_mode = 1;
             } else { fprintf(stderr, "redp2p: unknown option '%s'\n", argv[i]); redp2p_options_free(&opts); return 1; }
         }
 
         if (list_mode && (seats_option_set || pow_option_set)) {
             fprintf(stderr,
                 "redp2p: --list cannot be combined with --seats or --pow\n");
+            redp2p_options_free(&opts);
+            return 1;
+        }
+        if (prune_mode && (list_mode || seats_option_set || pow_option_set)) {
+            fprintf(stderr,
+                "redp2p: --prune cannot be combined with --list, --seats, or --pow\n");
             redp2p_options_free(&opts);
             return 1;
         }
@@ -387,6 +403,12 @@ int main(int argc, char **argv) {
             redp2p_close(ctx);
             redp2p_options_free(&opts);
             return ret == REDP2P_OK ? 0 : 1;
+        }
+        if (prune_mode) {
+            fprintf(stderr, "redp2p: index pruning runs automatically every 60 seconds\n");
+            redp2p_close(ctx);
+            redp2p_options_free(&opts);
+            return 0;
         }
         if (redp2p_set_pass(ctx, opts.pass) != REDP2P_OK) {
             fprintf(stderr, "redp2p: invalid REDP2P_PASS characters\n");

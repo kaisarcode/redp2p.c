@@ -4085,6 +4085,7 @@ typedef struct {
     fd_set readable_fds;
     int max_fd;
     int platform_initialized;
+    uint64_t last_prune;
 } redp2p_index_runtime_t;
 
 /**
@@ -4754,36 +4755,6 @@ static void redp2p_index_handle_deregister(redp2p_t *ctx, redp2p_fd_t fd,
  * @param req Request JSON object.
  * @return None.
  */
-static void redp2p_index_handle_prune(redp2p_t *ctx, redp2p_fd_t fd,
-    JSON_Object *req)
-{
-    size_t before;
-    size_t pruned;
-    JSON_Value *reply;
-    JSON_Object *out;
-
-    (void)req;
-    before = ctx->n_peers;
-    redp2p_evict_stale(ctx);
-    pruned = before - ctx->n_peers;
-    reply = json_value_init_object();
-    if (!reply) {
-        redp2p_index_respond_error(fd, 500, "internal");
-        return;
-    }
-    out = json_value_get_object(reply);
-    json_object_set_boolean(out, "ok", 1);
-    json_object_set_number(out, "pruned", (double)pruned);
-    redp2p_index_respond(fd, 200, "OK", reply);
-}
-
-/**
- * Handles one punch_req request, storing a bounded pending call.
- * @param ctx Locked index context.
- * @param fd  Request socket.
- * @param req Request JSON object.
- * @return None.
- */
 static void redp2p_index_handle_punch_req(redp2p_t *ctx, redp2p_fd_t fd,
     JSON_Object *req)
 {
@@ -4942,8 +4913,6 @@ static void redp2p_index_dispatch(redp2p_t *ctx, redp2p_fd_t fd,
         redp2p_index_handle_list(ctx, fd, req);
     else if (strcmp(op, "deregister") == 0)
         redp2p_index_handle_deregister(ctx, fd, req);
-    else if (strcmp(op, "prune") == 0)
-        redp2p_index_handle_prune(ctx, fd, req);
     else if (strcmp(op, "punch_req") == 0)
         redp2p_index_handle_punch_req(ctx, fd, req);
     else if (strcmp(op, "punch_poll") == 0)
@@ -5089,6 +5058,7 @@ static int redp2p_index_runtime_initialize(
     memset(runtime, 0, sizeof(*runtime));
     runtime->ctx = ctx;
     runtime->listener_fd = REDP2P_FD_INVALID;
+    runtime->last_prune = redp2p_now_s();
     if (redp2p_platform_init() != 0) {
         redp2p_set_error(ctx, "index: platform init failed");
         return REDP2P_ENET;
@@ -5292,7 +5262,16 @@ static int redp2p_index_event_loop(redp2p_index_runtime_t *runtime) {
             if (runtime->ctx->stop_requested) break;
             continue;
         }
-        if (ready_count == 0) continue;
+        if (ready_count == 0) {
+            uint64_t now = redp2p_now_s();
+            if (now - runtime->last_prune >= 60) {
+                redp2p_lock(runtime->ctx);
+                redp2p_evict_stale(runtime->ctx);
+                redp2p_unlock(runtime->ctx);
+                runtime->last_prune = now;
+            }
+            continue;
+        }
         redp2p_index_accept_connection(runtime);
         redp2p_index_process_connections(runtime);
     }
