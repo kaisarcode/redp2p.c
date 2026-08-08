@@ -90,7 +90,6 @@ Server stores nothing. Client must solve `proof = HMAC-SHA256(pass, nonce_hex ||
   "nonce": "a1b2c3d4e5f67890",
   "solution": "0000000000000001",
   "proof": "deadbeef...",
-  "pass": "optional_password",
   "proto": 1,
   "udp_port": 40000,
   "candidates": [
@@ -101,7 +100,7 @@ Server stores nothing. Client must solve `proof = HMAC-SHA256(pass, nonce_hex ||
 }
 ```
 
-The `pass` field is optional. If present, server uses it for PoW verification; otherwise uses server-configured global/VIP password.
+The `pass` field is **never sent by the client**. The server uses its configured password: global `REDP2P_PASS` or per-VIP `REDP2P_VIP` (shared secret distributed out-of-band). PoW is `proof = HMAC-SHA256(pass, nonce_hex || id || solution_hex)`.
 
 **Response (ok):**
 ```json

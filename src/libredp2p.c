@@ -4461,15 +4461,6 @@ static void redp2p_index_handle_register(redp2p_t *ctx, redp2p_fd_t fd,
         redp2p_index_respond_error(fd, 400, "bad_request");
         return;
     }
-    if (json_object_has_value(req, "pass") &&
-        !json_object_has_value_of_type(req, "pass", JSONString))
-    {
-        crypto_wipe(nonce, sizeof(nonce));
-        crypto_wipe(solution, sizeof(solution));
-        crypto_wipe(proof, sizeof(proof));
-        redp2p_index_respond_error(fd, 400, "bad_request");
-        return;
-    }
     if (!json_object_has_value_of_type(req, "proto", JSONNumber) ||
         !json_object_has_value_of_type(req, "udp_port", JSONNumber))
     {
@@ -6222,8 +6213,6 @@ redp2p_publisher_runtime_t *runtime)
     json_object_set_string(obj, "nonce", nonce);
     json_object_set_string(obj, "solution", solution);
     json_object_set_string(obj, "proof", proof);
-    if (ctx->pass[0] != '\0')
-        json_object_set_string(obj, "pass", ctx->pass);
     json_object_set_number(obj, "proto", (double)ctx->proto);
     json_object_set_number(obj, "udp_port", (double)ctx->bind_port);
     redp2p_index_append_candidates(obj, "candidates", candidates,
