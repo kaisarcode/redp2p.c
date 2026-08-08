@@ -1,140 +1,375 @@
 # REDP2P Index Protocol Specification (v1)
 
 ## Introduction
-The REDP2P Index is an architectural component designed as a stateless, decoupled coordination service. Its primary purpose is to function as a rendezvous point where peers register their reachability metadata and discover other peers.
 
-It is important to note that while the original C-based project includes a built-in index feature, the index protocol itself can be implemented independently in other languages (such as PHP, Node.js, Python, or others). This separation applies exclusively to the index server, not to the clients. Clients require low-level networking capabilities-such as managing direct UDP sockets, handling NAT hole punching routines, and running the KCP protocol layer-which cannot be provided by restricted environments like typical shared hosting platforms. Because REDP2P is fundamentally designed to connect individual user machines, hosting the index on lightweight, accessible servers enables coordination without forcing users to rely solely on dedicated VPS infrastructure.
+The REDP2P Index is a stateless HTTP coordination service. It acts as a rendezvous point where publishers register their reachability metadata and consumers discover publishers and initiate NAT traversal.
 
----
+The protocol is language-agnostic: any HTTP server that can accept JSON POST requests and store records with TTL can implement it. The reference implementation is the `redp2p idx <port>` command in C, but deployments may use PHP, Python, Go, etc.
 
-## API Endpoint Specification
-- Transport: HTTP/HTTPS
-- Method: POST
-- Content-Type: application/json
-- Payload: JSON object containing a mandatory "op" field. Unrecognized or missing "op" fields return HTTP 400 with a JSON error payload.
-
----
-
-## Protocol Operations
-
-### Operation: "publish"
-Registers or updates peer reachability metadata.
-
-#### Received Payload Fields
-- `op`: String, value `"publish"`.
-- `node_id`: String, unique identifier of the publishing peer.
-- `endpoint`: String, transport address in `IP:PORT` format.
-- `key`: String, local secret token for subsequent authentication.
-- `challenge_id`: String, required when responding to a PoW challenge.
-- `pow_nonce`: Unsigned integer, required when responding to a PoW challenge.
-- `vip_token`: String, optional administrative authorization token.
-
-#### Processing Logic
-**Authorization & Anti-Abuse:**
-
-- If `vip_token` matches the authorized store, PoW validation is skipped.
-- If `vip_token` is absent or invalid, the `challenge_id` and `pow_nonce` are evaluated.
-- If `challenge_id` and `pow_nonce` are missing or invalid/expired, the server generates a unique `challenge_id`, a random byte `seed`, and a system `difficulty` integer, stores the challenge state with an expiration timestamp, and returns a challenge requirement response.
-
-If challenge parameters are present, the server computes a SHA-256 hash over the byte concatenation of the challenge seed, the `pow_nonce`, and the `node_id`. The resulting hash must satisfy the bitwise target defined by `difficulty`. If verification fails, the request is rejected.
-
-**Capacity Management:**
-
-The server evaluates active records against `max_seats`. Expired entries based on TTL are purged. If capacity remains exhausted after purging, registration is refused.
-
-**Persistence:**
-
-Stores or updates the record mapped to `node_id` with `endpoint`, `key`, a generation timestamp, and TTL expiration.
-
-#### Server Responses
-- **Challenge Required Response:**
-{
-    "status": "challenge_required",
-    "challenge_id": "string",
-    "seed": "string",
-    "difficulty": integer
-}
-- **Success Response:**
-{
-    "status": "success",
-    "node_id": "string",
-    "ttl": integer,
-    "assigned_seat": integer
-}
-- **Error Response (Capacity Exceeded):**
-{
-    "status": "error",
-    "code": "capacity_exceeded",
-    "message": "string"
-}
-- **Error Response (Invalid PoW):**
-{
-    "status": "error",
-    "code": "invalid_pow",
-    "message": "string"
-}
+**Key properties:**
+- Transport: HTTP/HTTPS, JSON request/response
+- One endpoint, dispatched by `op` field
+- No persistent connections; publisher lifetime = TTL from `last_seen`
+- Proof-of-work only at registration; heartbeats use deregistration key only
+- Direct punch coordination via `punch_req` / `punch_poll` (no relay)
 
 ---
 
-### Operation: "lookup"
-Retrieves routing metadata for a target peer.
+## Common Conventions
 
-#### Received Payload Fields
-- `op`: String, value `"lookup"`.
-- `target_id`: String, identifier of the target peer.
+- All requests: `POST /` with `Content-Type: application/json`
+- All responses: JSON object with `status` field (`ok`, `error`, `challenge_required`, `not_found`)
+- Error responses include `code` and `message`
+- All string fields are UTF-8
+- Maximum request body: 16 KiB
+- Request timeout: 5 seconds
 
-#### Processing Logic
-1. Queries the storage backend for an active record matching `target_id`.
-2. Evaluates the record's TTL timestamp against current system time. Expired records are treated as non-existent.
-3. Retrieves the stored `endpoint` metadata if valid.
+### Field Definitions
 
-#### Server Responses
-- **Success Response:**
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string (1..63) | Publisher/consumer identifier, alnum only |
+| `pass` | string (optional) | Shared registration password |
+| `nonce` | hex string (16 chars) | 8-byte random challenge from server |
+| `solution` | hex string (16 chars) | 8-byte client solution |
+| `proof` | hex string (64 chars) | HMAC-SHA256(pass, nonce\|\|id\|\|solution) |
+| `key` | hex string (64 chars) | 32-byte deregistration key from server |
+| `proto` | integer | 1 = TCP (KCP), 2 = UDP |
+| `udp_port` | integer (1..65535) | Local UDP port for direct traffic |
+| `candidates` | array | Up to 8 candidate objects (see below) |
+
+### Candidate Object
+
+```json
 {
-    "status": "found",
-    "target_id": "string",
-    "endpoint": "string"
+  "type": "host|lan|public|srflx",
+  "ip": "x.x.x.x|xxxx:...",
+  "port": 12345,
+  "priority": 100
 }
-- **Error Response (Not Found / Expired):**
-{
-    "status": "not_found",
-    "target_id": "string"
-}
+```
+
+- `type`: one of `host`, `lan`, `public`, `srflx`
+- `ip`: literal IPv4 or IPv6 address
+- `port`: UDP port
+- `priority`: local priority (lower = preferred)
+
+Server validates all candidates, deduplicates by (ip,port), recomputes local priority.
 
 ---
 
-### Operation: "drop"
-Removes a peer entry from the index upon graceful shutdown.
+## Operations
 
-#### Received Payload Fields
-- `op`: String, value `"drop"`.
-- `node_id`: String, identifier of the peer.
-- `key`: String, matching secret token established during publication.
+### `challenge` - Request PoW challenge
 
-#### Processing Logic
-1. Locates the record associated with `node_id`.
-2. Compares the provided `key` against the stored `key`.
-3. Purges the record immediately if authorization succeeds.
+**Request:**
+```json
+{ "op": "challenge", "id": "publisher1", "pass": "optional_password" }
+```
 
-#### Server Responses
-- **Success Response:**
+**Response (challenge_required):**
+```json
 {
-    "status": "success",
-    "node_id": "string",
-    "message": "dropped"
+  "status": "challenge_required",
+  "nonce": "a1b2c3d4e5f67890",
+  "bits": 16
 }
-- **Error Response (Unauthorized / Not Found):**
-{
-    "status": "error",
-    "code": "unauthorized",
-    "message": "string"
-}
+```
+
+Server stores nothing. Client must solve `proof = HMAC-SHA256(pass, nonce_hex || id || solution_hex)` with `bits` leading zero bits.
 
 ---
 
-## Architectural Constraints & System Lifecycle
+### `register` - Register or re-register publisher
 
-- **Stateless Request-Response Cycle:** Each incoming HTTP request must be completely self-contained. The server must not rely on resident background daemons, persistent socket listeners, or in-memory process state.
-- **Storage Agnosticism:** The underlying storage backend can be flat files, a lightweight SQL database, or a key-value store. It must support rapid read/write operations and automatic expiration of stale records.
-- **Zero Transport Logic:** The index code must not contain UDP, KCP, or socket-binding logic for peer-to-peer data transmission.
-- **Autonomous Server-Side Pruning:** No cleanup or prune operations are exposed to the clients or peers. Lifecycle management, such as the expiration of stale records based on time-to-live (TTL) and seat reclamation, is handled entirely and transparently by the server-side implementation.
+**Request:**
+```json
+{
+  "op": "register",
+  "id": "publisher1",
+  "nonce": "a1b2c3d4e5f67890",
+  "solution": "0000000000000001",
+  "proof": "deadbeef...",
+  "pass": "optional_password",
+  "proto": 1,
+  "udp_port": 40000,
+  "candidates": [
+    {"type": "host", "ip": "10.0.0.5", "port": 40000, "priority": 100},
+    {"type": "lan", "ip": "192.168.1.50", "port": 40000, "priority": 110},
+    {"type": "public", "ip": "203.0.113.10", "port": 40000, "priority": 120}
+  ]
+}
+```
+
+**Response (ok):**
+```json
+{
+  "status": "ok",
+  "key": "a1b2c3d4e5f6...(64 hex chars)"
+}
+```
+
+**Error responses:**
+- `bad_request` - malformed/oversized input
+- `invalid_id` - id not alnum or >63 chars
+- `auth_failed` - password mismatch or invalid PoW
+- `table_full` - seats capacity exhausted (VIPs reserved)
+
+Server verifies PoW by recomputing from echoed fields. On success, upserts record:
+- `last_seen = now`
+- `key` is **stable**: re-registration never rotates the key
+- Returns existing key on re-registration
+
+---
+
+### `heartbeat` - Refresh publisher TTL and endpoints
+
+**Request:**
+```json
+{
+  "op": "heartbeat",
+  "id": "publisher1",
+  "key": "a1b2c3d4e5f6...",
+  "proto": 1,
+  "udp_port": 40000,
+  "candidates": [...]
+}
+```
+
+**Response (ok):**
+```json
+{ "status": "ok" }
+```
+
+**Error responses:**
+- `not_found` - unknown or expired id
+- `invalid_key` - key mismatch
+
+No PoW. Updates `last_seen`, `proto`, `udp_port`, `candidates`. If record expired, client must `register` again.
+
+---
+
+### `lookup` - Get one publisher record
+
+**Request:**
+```json
+{ "op": "lookup", "id": "publisher1" }
+```
+
+**Response (ok):**
+```json
+{
+  "status": "ok",
+  "id": "publisher1",
+  "proto": 1,
+  "udp_port": 40000,
+  "candidates": [...],
+  "last_seen": 1700000000
+}
+```
+
+**Error (not_found):**
+```json
+{ "status": "not_found", "id": "publisher1" }
+```
+
+Filters expired records without writing.
+
+---
+
+### `list` - List all active publisher IDs
+
+**Request:**
+```json
+{ "op": "list" }
+```
+
+**Response (ok):**
+```json
+{ "status": "ok", "ids": ["publisher1", "publisher2"] }
+```
+
+Returns only non-expired IDs.
+
+---
+
+### `deregister` - Remove publisher record
+
+**Request:**
+```json
+{ "op": "deregister", "id": "publisher1", "key": "a1b2c3d4e5f6..." }
+```
+
+**Response (ok):**
+```json
+{ "status": "ok" }
+```
+
+**Error:**
+- `not_found` - unknown id
+- `invalid_key` - key mismatch
+
+---
+
+### `punch_req` - Consumer announces itself to publisher
+
+**Request:**
+```json
+{
+  "op": "punch_req",
+  "self_id": "consumer1",
+  "target_id": "publisher1",
+  "session": "abc123",
+  "candidates": [...]
+}
+```
+
+**Response (ok):**
+```json
+{ "status": "ok" }
+```
+
+Stores bounded pending call (TTL 30s). Consumer sends after `lookup`.
+
+---
+
+### `punch_poll` - Publisher retrieves pending calls
+
+**Request:**
+```json
+{ "op": "punch_poll", "id": "publisher1" }
+```
+
+**Response (ok):**
+```json
+{
+  "status": "ok",
+  "calls": [
+    {
+      "self_id": "consumer1",
+      "target_id": "publisher1",
+      "session": "abc123",
+      "candidates": [...]
+    }
+  ]
+}
+```
+
+Returns and consumes calls for this publisher. Publisher polls at ~500ms cadence.
+
+---
+
+## Error Codes
+
+| Code | Meaning | HTTP Status |
+|------|---------|-------------|
+| `bad_request` | Malformed, oversized, truncated, duplicate fields | 400 |
+| `invalid_id` | Identifier rejected (not alnum, too long) | 400 |
+| `auth_failed` | Password mismatch or invalid PoW | 403 |
+| `invalid_key` | Deregistration key mismatch | 403 |
+| `not_found` | Unknown or expired id | 404 |
+| `table_full` | Seats capacity exhausted | 503 |
+| `internal` | Server failure | 500 |
+
+All errors: `{ "status": "error", "code": "...", "message": "..." }`
+
+---
+
+## Server Behavior
+
+### Record Schema
+
+```
+PublisherRecord {
+  id: string
+  key: hex string (32 bytes)
+  proto: 1|2
+  udp_port: uint16
+  candidates: Candidate[8]
+  last_seen: unix_timestamp
+}
+```
+
+### TTL
+
+- Default TTL: 120 seconds (`REDP2P_ETIMEOUT_SEC`)
+- Record expired if `now - last_seen > TTL`
+- Expired records filtered from `lookup`/`list` (no write)
+- Physical removal: automatic every 60s in event loop, or explicit `prune` operation
+
+### Seats / Capacity
+
+- Optional `max_seats` (via `--seats` or `REDP2P_SEATS`)
+- Each VIP reservation occupies 1 seat (configured via `REDP2P_VIP`)
+- Non-VIP publishers share remaining seats
+- `table_full` when no seats available
+
+### Proof of Work
+
+- Algorithm: `HMAC-SHA256(pass, nonce_hex || id || solution_hex)`
+- `pass`: global password (`REDP2P_PASS`) or per-VIP password; empty string if none
+- Server recomputes from request fields; checks leading zero bits
+- No server-side challenge storage (stateless)
+
+### Punch Coordination
+
+1. Consumer `lookup` → gets publisher candidates
+2. Consumer `punch_req` with its own candidates + session id
+3. Publisher `punch_poll` retrieves pending call
+4. Both run direct `PUNCH_PING`/`PONG` probe against each other's candidates
+5. On success, establish KCP (TCP mode) or UDP stream
+
+---
+
+## Implementation Notes
+
+- **No background daemons required**: prune can run on a cron job or in the request path
+- **Storage**: any K/V store with TTL support (files, SQLite, Redis, etc.)
+- **No UDP/KCP/socket logic** in index
+- **Key stability**: registration key minted once, never rotated
+- **Heartbeat auth**: deregistration key only (possession proves ownership)
+- **Candidate validation**: strict IP:port parsing, dedup, priority recompute
+- **Bounds**: all fields bounded; reject oversized/truncated/duplicate input
+
+---
+
+## Example Flow
+
+```bash
+# 1. Get challenge
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"op":"challenge","id":"alice"}' http://index:8080/
+
+# 2. Solve PoW locally, register
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"op":"register","id":"alice","nonce":"...","solution":"...","proof":"...","proto":1,"udp_port":40000,"candidates":[...]}' \
+  http://index:8080/
+
+# Returns key: store locally for heartbeat/deregister
+
+# 3. Heartbeat every 15s
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"op":"heartbeat","id":"alice","key":"...","proto":1,"udp_port":40000,"candidates":[...]}' \
+  http://index:8080/
+
+# 4. Consumer looks up publisher
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"op":"lookup","id":"alice"}' http://index:8080/
+
+# 5. Consumer requests punch
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"op":"punch_req","self_id":"bob","target_id":"alice","session":"s1","candidates":[...]}' \
+  http://index:8080/
+
+# 6. Publisher polls (500ms)
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"op":"punch_poll","id":"alice"}' http://index:8080/
+
+# 7. Both punch directly via UDP, establish KCP/TCP or UDP tunnel
+```
+
+---
+
+## Versioning
+
+This is protocol v1. Future versions may add optional fields but must not change the semantics of existing operations. Clients should ignore unknown response fields.
