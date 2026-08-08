@@ -158,6 +158,8 @@ static void test_port_requirement(unsigned int offset, int *tcp, int *udp) {
         *tcp = offset >= 60U && offset <= 62U;
     } else if (strcmp(test_case_name, "redp2p_list_publishers") == 0) {
         *tcp = offset >= 80U && offset <= 84U;
+    } else if (strcmp(test_case_name, "redp2p_heartbeat") == 0) {
+        *tcp = offset >= 100U && offset <= 102U;
     }
 }
 
@@ -3357,6 +3359,37 @@ cleanup:
 }
 
 /**
+ * Tests publisher heartbeat survival past heartbeat interval.
+ * Verifies a publisher remains registered well beyond the heartbeat interval
+ * (15s) with the default eviction timeout (120s).
+ * @return 0 on success, 1 on failure.
+ */
+static int case_redp2p_heartbeat(void) {
+    test_index_t index;
+    test_publisher_t publisher;
+    unsigned short base;
+    int rc;
+
+    rc = 0;
+    base = (unsigned short)(test_port_base() + 100U);
+    if (test_index_start(&index, (unsigned short)(base + 1U)) != 0) return 1;
+    if (test_publisher_start(&publisher, "hbping", (unsigned short)(base + 1U),
+        (unsigned short)(base + 2U)) != 0) {
+        test_index_stop(&index);
+        return 1;
+    }
+    test_sleep_ms(20000U);
+    rc += expect_int("publisher survives past heartbeat interval", 0,
+        test_http_request((unsigned short)(base + 1U),
+            "{\"op\":\"lookup\",\"id\":\"hbping\"}",
+            strlen("{\"op\":\"lookup\",\"id\":\"hbping\"}"), 200,
+            "\"udp_port\":"));
+    test_publisher_stop(&publisher);
+    test_index_stop(&index);
+    return rc == 0 ? 0 : 1;
+}
+
+/**
  * Tests redp2p_list_publishers.
  * @return 0 on success, 1 on failure.
  */
@@ -3661,6 +3694,7 @@ static int run_case(const char *name) {
     if (strcmp(name, "redp2p_udp_tunnel") == 0) return case_redp2p_udp_tunnel();
     if (strcmp(name, "redp2p_tcp_stream") == 0) return case_redp2p_tcp_stream();
     if (strcmp(name, "redp2p_deregister") == 0) return case_redp2p_deregister();
+    if (strcmp(name, "redp2p_heartbeat") == 0) return case_redp2p_heartbeat();
     if (strcmp(name, "redp2p_list_publishers") == 0) return case_redp2p_list_publishers();
     if (strcmp(name, "redp2p_get_error") == 0) return case_redp2p_get_error();
     if (strcmp(name, "redp2p_set_seats") == 0) return case_redp2p_set_seats();

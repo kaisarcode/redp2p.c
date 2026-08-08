@@ -172,7 +172,7 @@ static int redp2p_parse_size(const char *text, size_t *out) {
     return 1;
 }
 
-#define REDP2P_ETIMEOUT_SEC     15
+#define REDP2P_ETIMEOUT_SEC     120
 #define REDP2P_DISCONNECT_S     10
 #define REDP2P_KEEPALIVE_S       3
 #define REDP2P_PUNCH_ATTEMPTS   10
@@ -754,6 +754,9 @@ struct redp2p {
     int fault_drop_counter;
     int fault_reorder_counter;
     unsigned long prune_interval_s;
+    unsigned long etimeout_sec;
+    unsigned long heartbeat_s;
+    unsigned long punch_poll_ms;
     redp2p_pending_call_t pending_calls[REDP2P_MAX_PENDING_CALLS];
     int n_pending_calls;
     _Atomic int stop_requested;
@@ -2682,12 +2685,33 @@ int redp2p_open(redp2p_t **out) {
     ctx->conns_cap = 0;
     ctx->n_pending_calls = 0;
     ctx->prune_interval_s = REDP2P_PRUNE_INTERVAL_S;
+    ctx->etimeout_sec = REDP2P_ETIMEOUT_SEC;
+    ctx->heartbeat_s = REDP2P_HEARTBEAT_S;
+    ctx->punch_poll_ms = REDP2P_PUNCH_POLL_MS;
     {
         const char *env = getenv("REDP2P_PRUNE_INTERVAL_S");
         if (env) {
             long v = 0;
             if (redp2p_parse_u(env, 1, 3600, &v) == REDP2P_OK)
                 ctx->prune_interval_s = (unsigned long)v;
+        }
+        env = getenv("REDP2P_ETIMEOUT_SEC");
+        if (env) {
+            long v = 0;
+            if (redp2p_parse_u(env, 1, 86400, &v) == REDP2P_OK)
+                ctx->etimeout_sec = (unsigned long)v;
+        }
+        env = getenv("REDP2P_HEARTBEAT_S");
+        if (env) {
+            long v = 0;
+            if (redp2p_parse_u(env, 1, 3600, &v) == REDP2P_OK)
+                ctx->heartbeat_s = (unsigned long)v;
+        }
+        env = getenv("REDP2P_PUNCH_POLL_MS");
+        if (env) {
+            long v = 0;
+            if (redp2p_parse_u(env, 10, 60000, &v) == REDP2P_OK)
+                ctx->punch_poll_ms = (unsigned long)v;
         }
     }
     ctx->stop_requested = 0;
@@ -3098,7 +3122,7 @@ static void redp2p_evict_stale(redp2p_t *ctx) {
     i = ctx->n_peers;
     while (i > 0) {
         i--;
-        if (now - ctx->peers[i].last_seen > REDP2P_ETIMEOUT_SEC) {
+        if (now - ctx->peers[i].last_seen > ctx->etimeout_sec) {
             if (i < ctx->n_peers - 1) {
                 memmove(&ctx->peers[i], &ctx->peers[i + 1],
                     (ctx->n_peers - i - 1) * sizeof(ctx->peers[0]));
@@ -3119,7 +3143,7 @@ static int redp2p_peer_is_stale(redp2p_t *ctx, size_t index) {
 
     if (index >= ctx->n_peers) return 1;
     now = redp2p_now_s();
-    return now - ctx->peers[index].last_seen > REDP2P_ETIMEOUT_SEC;
+    return now - ctx->peers[index].last_seen > ctx->etimeout_sec;
 }
 
 /**
@@ -6602,7 +6626,7 @@ redp2p_publisher_runtime_t *runtime)
     int result;
 
     ctx = runtime->borrowed_ctx;
-    if (redp2p_now_s() - runtime->last_heartbeat < REDP2P_HEARTBEAT_S)
+    if (redp2p_now_s() - runtime->last_heartbeat < ctx->heartbeat_s)
         return REDP2P_OK;
     if (ctx->key[0] == '\0') return REDP2P_ENOENT;
     candidate_count = 0;
@@ -6656,7 +6680,7 @@ redp2p_publisher_runtime_t *runtime)
     int result;
 
     ctx = runtime->borrowed_ctx;
-    if (redp2p_now_ms() - runtime->last_punch_poll < REDP2P_PUNCH_POLL_MS)
+    if (redp2p_now_ms() - runtime->last_punch_poll < ctx->punch_poll_ms)
         return REDP2P_OK;
     request = json_value_init_object();
     if (!request) {
@@ -6672,6 +6696,8 @@ redp2p_publisher_runtime_t *runtime)
     json_value_free(request);
     if (result != REDP2P_OK) {
         runtime->last_punch_poll = redp2p_now_ms();
+        if (result == REDP2P_ETIMEOUT)
+            return REDP2P_OK;
         return result;
     }
     out = json_value_get_object(response);
@@ -6894,7 +6920,7 @@ static uint32_t redp2p_publisher_wait_ms(
     now = redp2p_now_ms();
     {
         int64_t until_poll = (int64_t)runtime->last_punch_poll +
-            REDP2P_PUNCH_POLL_MS - (int64_t)now;
+            runtime->borrowed_ctx->punch_poll_ms - (int64_t)now;
 
         if (until_poll < 1) until_poll = 1;
         if ((uint64_t)until_poll < wait_ms) wait_ms = (uint32_t)until_poll;
@@ -6944,12 +6970,12 @@ redp2p_publisher_runtime_t *runtime)
         if (selected < 0) continue;
         if (runtime->borrowed_ctx->stop_requested) break;
         stage_result = redp2p_publisher_heartbeat(runtime);
-        if (stage_result != REDP2P_OK) {
+        if (stage_result != REDP2P_OK && stage_result != REDP2P_ETIMEOUT) {
             result = stage_result;
             break;
         }
         stage_result = redp2p_publisher_punch_poll(runtime);
-        if (stage_result != REDP2P_OK) {
+        if (stage_result != REDP2P_OK && stage_result != REDP2P_ETIMEOUT) {
             result = stage_result;
             break;
         }

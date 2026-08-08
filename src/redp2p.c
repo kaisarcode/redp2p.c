@@ -258,6 +258,9 @@ printf("  idx <port> -p, --prune                 Prune expired index records\n")
     printf("  REDP2P_SWEEP              UDP port sweep range used during punch fallback\n");
     printf("  REDP2P_STUN               Optional STUN URL (stun:host:port)\n");
     printf("  REDP2P_PRUNE_INTERVAL_S   Index prune interval seconds (1..3600, default 60)\n");
+    printf("  REDP2P_ETIMEOUT_SEC       Index eviction TTL seconds (1..86400, default 120)\n");
+    printf("  REDP2P_HEARTBEAT_S        Publisher heartbeat interval seconds (1..3600, default 15)\n");
+    printf("  REDP2P_PUNCH_POLL_MS      Publisher punch poll interval ms (10..60000, default 500)\n");
     printf("  IDs may use only A-Z a-z 0-9\n");
     printf("  Passwords may use A-Z a-z 0-9 . _ - + = , : @ %% /\n");
 }
