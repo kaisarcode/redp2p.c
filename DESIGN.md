@@ -212,6 +212,22 @@ The design should prefer:
 
 Databases, synchronized key stores, registration history, and persistent index state are outside the project scope.
 
+## Session Tracking Boundary
+
+The index does not track active consumer↔publisher sessions. Its role ends at punch coordination:
+- Publisher registration and heartbeats
+- Consumer lookup and `punch_req`
+- Pending punch call storage (TTL 30s)
+
+Once hole punching succeeds, application traffic travels directly over UDP between peers. The index has no visibility into:
+- Which consumers are currently connected to a publisher
+- Active TCP/UDP session state
+- Application-level connection lifecycle
+
+The publisher runtime maintains its own session table (`owned_sessions[]`) locally. It knows which consumers are connected via direct UDP/KCP session state. Applications requiring connection awareness (logging, access control, etc.) must implement it at the application layer - e.g., by tracking sessions in their own protocol callbacks or exposing a local admin interface.
+
+This boundary keeps the index stateless and the project scope bounded. Consumer session tracking belongs to the transported application, not the coordination layer.
+
 ## Composition
 
 REDP2P should compose with existing tools and protocols rather than absorb their responsibilities.
