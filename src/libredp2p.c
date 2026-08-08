@@ -14,6 +14,7 @@
 #include "libredp2p.h"
 #include "ikcp.h"
 #include "monocypher.h"
+#include "parson.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -74,7 +75,6 @@ typedef int redp2p_fd_t;
 #define REDP2P_POW_MAX      32
 #define REDP2P_PORT_MIN      1
 #define REDP2P_PORT_MAX      65535
-#define REDP2P_POW_CHALLENGE_TTL_S 120
 
 /**
  * Parses one strict unsigned decimal integer.
@@ -105,6 +105,33 @@ static int redp2p_parse_u(const char *text, long min, long max, long *out) {
     if (value < (unsigned long)min) return 0;
     *out = (long)value;
     return 1;
+}
+
+/**
+ * Compares two ASCII strings case-insensitively.
+ * Summary: Keeps HTTP header-name matching portable across platforms that
+ *          do not declare strcasecmp (macOS with strict C, Windows).
+ * @param a Left string.
+ * @param b Right string.
+ * @return 0 when equal ignoring ASCII case, nonzero otherwise.
+ */
+static int redp2p_ascii_casecmp(const char *a, const char *b) {
+    size_t i;
+
+    if (!a || !b) return -1;
+    for (i = 0; ; i++) {
+        unsigned char ca;
+        unsigned char cb;
+
+        ca = (unsigned char)a[i];
+        cb = (unsigned char)b[i];
+        if (ca >= (unsigned char)'A' && ca <= (unsigned char)'Z')
+            ca = (unsigned char)(ca - (unsigned char)'A' + (unsigned char)'a');
+        if (cb >= (unsigned char)'A' && cb <= (unsigned char)'Z')
+            cb = (unsigned char)(cb - (unsigned char)'A' + (unsigned char)'a');
+        if (ca != cb) return (int)ca - (int)cb;
+        if (ca == '\0') return 0;
+    }
 }
 
 /**
@@ -151,8 +178,13 @@ static int redp2p_parse_size(const char *text, size_t *out) {
 #define REDP2P_PUNCH_ATTEMPTS   10
 #define REDP2P_PUNCH_INTERVAL_MS 200
 #define REDP2P_CANDIDATES_MAX       16
-#define REDP2P_MAX_PENDING_PUNCHES  32
-#define REDP2P_POW_CHALLENGES_MAX 256
+#define REDP2P_MAX_PENDING_CALLS     32
+#define REDP2P_MAX_PENDING_ANSWERS   32
+#define REDP2P_PENDING_CALL_TTL_S    30
+#define REDP2P_PENDING_ANSWER_TTL_S  30
+#define REDP2P_POW_CHALLENGES_MAX   256
+#define REDP2P_POW_CHALLENGE_TTL_S   120
+#define REDP2P_MAX_CONNECTIONS      128
 #define REDP2P_STREAM_MAGIC             0x50434b52u
 #define REDP2P_STREAM_VERSION           2u
 #define REDP2P_STREAM_SESSION_ID_SZ     16
@@ -176,9 +208,16 @@ static int redp2p_parse_size(const char *text, size_t *out) {
 #define REDP2P_PUNCH_DIRECT_WAIT_MS 500
 #define REDP2P_PUNCH_SWEEP_WAIT_MS 20
 #define REDP2P_PUNCH_TOTAL_MS 4000
+#define REDP2P_PUNCH_POLL_MS 500
 #define REDP2P_CTRL_LINE_MAX     1024
 #define REDP2P_CTRL_FIELD_MAX     256
 #define REDP2P_CTRL_SESSION_MAX    63
+#define REDP2P_HTTP_LINE_MAX      256
+#define REDP2P_HTTP_HEADERS_MAX    32
+#define REDP2P_HTTP_BODY_MAX     REDP2P_BUF
+#define REDP2P_HTTP_TIMEOUT_S       5
+#define REDP2P_HTTP_BUF_MAX (REDP2P_HTTP_LINE_MAX * REDP2P_HTTP_HEADERS_MAX + \
+    REDP2P_HTTP_BODY_MAX + 128)
 #define REDP2P_CTRTOK_HELLO        "REDP2P_CTRTOK_HELLO REDP2P/1"
 #define REDP2P_CTRTOK_HELLO_OK     "REDP2P_CTRTOK_HELLO_OK"
 #define REDP2P_CTRTOK_ERROR_VERSION_MISMATCH "REDP2P_CTRTOK_ERROR:version mismatch"
@@ -214,6 +253,10 @@ static int redp2p_parse_size(const char *text, size_t *out) {
 #define REDP2P_CTRCMD_LIST_PUBLISHERS "REDP2P_CTRTOK_LIST_PUBLISHERS"
 #define REDP2P_CTRCMD_PUNCH_REQ2   "REDP2P_CTRTOK_PUNCH_REQ2"
 #define REDP2P_CTRCMD_PUNCH_ACK2   "REDP2P_CTRTOK_PUNCH_ACK2"
+#define REDP2P_CTRCMD_CALL         "REDP2P_CTRTOK_CALL"
+#define REDP2P_CTRCMD_COLLECT      "REDP2P_CTRTOK_COLLECT"
+#define REDP2P_CTRCMD_ANSWER       "REDP2P_CTRTOK_ANSWER"
+#define REDP2P_CTRCMD_POLL         "REDP2P_CTRTOK_POLL"
 
 #define REDP2P_CTRTOK_ERROR_MALFORMED "REDP2P_CTRTOK_ERROR:malformed"
 #define REDP2P_CTRTOK_ERROR_INVALID_ID "REDP2P_CTRTOK_ERROR:invalid id"
@@ -224,6 +267,26 @@ static int redp2p_parse_size(const char *text, size_t *out) {
 #define REDP2P_CTRTOK_ERROR_OFFLINE "REDP2P_CTRTOK_ERROR:offline"
 #define REDP2P_CTRTOK_ERROR_INVALID_KEY "REDP2P_CTRTOK_ERROR:invalid key"
 #define REDP2P_CTRTOK_ERROR_UNKNOWN_COMMAND "REDP2P_CTRTOK_ERROR:unknown command"
+#define REDP2P_CTRTOK_ERROR_TARGET_OFFLINE "REDP2P_CTRTOK_ERROR:target offline"
+
+#define REDP2P_CTRTOK_CALL      "REDP2P_CTRTOK_CALL:"
+#define REDP2P_CTRTOK_COLLECT   "REDP2P_CTRTOK_COLLECT:"
+#define REDP2P_CTRTOK_ANSWER    "REDP2P_CTRTOK_ANSWER:"
+#define REDP2P_CTRTOK_POLL      "REDP2P_CTRTOK_POLL:"
+#define REDP2P_CTRTOK_CALL2     "REDP2P_CTRTOK_CALL2:"
+#define REDP2P_CTRTOK_ANSWER2   "REDP2P_CTRTOK_ANSWER2:"
+#define REDP2P_CTRTOK_CALL_OK   "REDP2P_CTRTOK_CALL_OK"
+#define REDP2P_CTRTOK_ANSWER_OK "REDP2P_CTRTOK_ANSWER_OK"
+#define REDP2P_CTRTOK_NONE      "REDP2P_CTRTOK_NONE"
+
+#define REDP2P_INDEX_PATH_REGISTER   "/redp2p/1/register"
+#define REDP2P_INDEX_PATH_DEREGISTER "/redp2p/1/deregister"
+#define REDP2P_INDEX_PATH_LOOKUP     "/redp2p/1/lookup"
+#define REDP2P_INDEX_PATH_LIST       "/redp2p/1/list"
+#define REDP2P_INDEX_PATH_CALL       "/redp2p/1/call"
+#define REDP2P_INDEX_PATH_COLLECT    "/redp2p/1/collect"
+#define REDP2P_INDEX_PATH_ANSWER     "/redp2p/1/answer"
+#define REDP2P_INDEX_PATH_POLL       "/redp2p/1/poll"
 
 #define REDP2P_STREAM_TYPE_HELLO      1u
 #define REDP2P_STREAM_TYPE_HELLO_ACK  2u
@@ -439,14 +502,6 @@ static void redp2p_sha256_final(redp2p_sha256_t *ctx, unsigned char hash[32]) {
     }
 }
 
-typedef struct {
-    char nonce_hex[17];
-    char id[REDP2P_ID_MAX + 1];
-    struct sockaddr_storage addr;
-    uint64_t issued_at;
-    uint64_t expires_at;
-} redp2p_pow_challenge_t;
-
 /**
  * Computes one HMAC-SHA256 digest.
  * @param key     Shared password material.
@@ -641,30 +696,32 @@ static int redp2p_count_leading_zero_bits(const unsigned char hash[32]) {
 }
 
 typedef struct {
-    redp2p_fd_t fd;
-    char buf[REDP2P_BUF];
-    int buf_len;
-    char id[REDP2P_ID_MAX + 1];
-    int registered;
-    int hello_ok;
-} redp2p_tcp_conn_t;
-
-typedef struct {
     char id[REDP2P_ID_MAX + 1];
     char pass[REDP2P_PASS_MAX + 1];
 } redp2p_vip_entry_t;
 
 /**
- * Pending punch.
- * Summary: Tracks a two-round punch request awaiting ACK2 from publisher.
+ * Pending call.
+ * Summary: Stores one request-driven punch introduction awaiting pickup.
  */
 typedef struct {
-    char self_id[REDP2P_ID_MAX + 1];
+    char caller_id[REDP2P_ID_MAX + 1];
     char target_id[REDP2P_ID_MAX + 1];
-    char sess_id[64];
-    redp2p_fd_t consumer_fd;
+    char sess_id[REDP2P_CTRL_SESSION_MAX + 1];
+    redp2p_candidate_t candidates[REDP2P_PEER_CANDIDATES_MAX];
+    int n_candidates;
     uint64_t ts;
-} redp2p_pending_punch_t;
+} redp2p_pending_call_t;
+
+/**
+ * Stores one in-flight index HTTP connection and its partial request buffer.
+ */
+typedef struct {
+    redp2p_fd_t fd;
+    char buf[REDP2P_HTTP_BUF_MAX + 1];
+    int buf_len;
+    uint64_t ts;
+} redp2p_index_conn_t;
 
 struct redp2p {
     redp2p_peer_t *peers;
@@ -673,12 +730,12 @@ struct redp2p {
     size_t n_peers_cap;
     size_t nonvip_cap;
     int seats_set;
-    redp2p_tcp_conn_t *conns;
-    int n_conns;
-    int conns_cap;
     redp2p_vip_entry_t *vips;
     size_t n_vips;
     size_t vips_cap;
+    redp2p_index_conn_t *conns;
+    int n_conns;
+    int conns_cap;
     char key[REDP2P_KEY_STR_SZ];
     char pass[REDP2P_PASS_MAX + 1];
     int pow_bits;
@@ -686,8 +743,6 @@ struct redp2p {
     int explicit_port;
     int proto;
     int sweep;
-    redp2p_pow_challenge_t pow_challenges[REDP2P_POW_CHALLENGES_MAX];
-    int n_pow_challenges;
 #ifdef _WIN32
     CRITICAL_SECTION mutex;
 #else
@@ -697,8 +752,8 @@ struct redp2p {
     char err_buf[256];
     int fault_drop_counter;
     int fault_reorder_counter;
-    redp2p_pending_punch_t pending_punches[REDP2P_MAX_PENDING_PUNCHES];
-    int n_pending_punches;
+    redp2p_pending_call_t pending_calls[REDP2P_MAX_PENDING_CALLS];
+    int n_pending_calls;
     _Atomic int stop_requested;
 };
 
@@ -736,6 +791,8 @@ typedef struct {
     int n_sessions;
     int cap_sessions;
     int platform_initialized;
+    redp2p_candidate_t peer_candidates[REDP2P_PEER_CANDIDATES_MAX];
+    int n_peer_candidates;
 } redp2p_consumer_runtime_t;
 
 typedef struct redp2p_udp_server_session {
@@ -755,12 +812,12 @@ typedef struct {
     const char *borrowed_self_id;
     const char *borrowed_udp_any_host;
     unsigned short index_port;
-    redp2p_fd_t owned_control_fd;
     redp2p_fd_t owned_udp_fd;
     redp2p_udp_server_session_t *owned_sessions;
     int session_count;
     int session_capacity;
     uint64_t last_heartbeat;
+    uint64_t last_punch_poll;
 } redp2p_publisher_runtime_t;
 
 #ifdef _WIN32
@@ -2036,18 +2093,6 @@ static redp2p_fd_t redp2p_tcp_connect(const char *host, unsigned short port) {
 }
 
 /**
- * Tcp send.
- * @return 0 on success, -1 on error.
- */
-static int redp2p_tcp_send(redp2p_fd_t fd, const char *msg) {
-    int len = (int)strlen(msg);
-
-    if (redp2p_write_all(fd, msg, len) != 0) return REDP2P_ENET;
-    if (redp2p_write_all(fd, "\n", 1) != 0) return REDP2P_ENET;
-    return REDP2P_OK;
-}
-
-/**
  * Reports whether raw control bytes are safe for C-string parsing.
  * @param data Raw control bytes.
  * @param len  Byte count.
@@ -2105,61 +2150,275 @@ static int redp2p_tcp_readline(redp2p_fd_t fd, char *buf, int cap, int timeout_s
 }
 
 /**
- * Opens a TCP control connection and validates the control protocol version.
- * @param index_host Index host.
- * @param index_port Index port.
- * @return Connected fd on success, invalid fd on failure.
+ * Maps one index JSON error code to a library result code.
+ * @param code Index reply error code.
+ * @return REDP2P_* result code.
  */
-static redp2p_fd_t redp2p_control_connect(redp2p_t *ctx, const char *phase,
-    const char *index_host, unsigned short index_port, int *result)
+static int redp2p_http_map_error(const char *code)
 {
-    redp2p_fd_t fd;
-    char reply[REDP2P_BUF];
-    int line_result;
+    if (!code) return REDP2P_EPROTO;
+    if (strcmp(code, "bad_request") == 0 || strcmp(code, "busy") == 0)
+        return REDP2P_EPROTO;
+    if (strcmp(code, "invalid_id") == 0)
+        return REDP2P_EINVAL;
+    if (strcmp(code, "auth_failed") == 0 || strcmp(code, "invalid_key") == 0)
+        return REDP2P_EAUTH;
+    if (strcmp(code, "not_found") == 0)
+        return REDP2P_ENOENT;
+    if (strcmp(code, "table_full") == 0)
+        return REDP2P_EFULL;
+    if (strcmp(code, "internal") == 0)
+        return REDP2P_ERROR;
+    return REDP2P_EPROTO;
+}
 
-    if (result) *result = REDP2P_ENET;
-    fd = redp2p_tcp_connect(index_host, index_port);
+/**
+ * Reads one bounded chunk of one index HTTP response body.
+ * @param fd  Response socket.
+ * @param buf Output buffer.
+ * @param cap Output buffer capacity.
+ * @return Bytes read, or a negative value on timeout or failure.
+ */
+static int redp2p_http_read_some(redp2p_fd_t fd, char *buf, int cap)
+{
+    fd_set fds;
+    struct timeval tv;
+    int n;
+
+    if (cap < 1) return -1;
+    FD_ZERO(&fds);
+    if (!redp2p_fdset_add(fd, &fds, NULL)) return -1;
+    tv.tv_sec = REDP2P_HTTP_TIMEOUT_S;
+    tv.tv_usec = 0;
+    n = select((int)fd + 1, &fds, NULL, NULL, &tv);
+    if (n <= 0) return -1;
+    return redp2p_sock_read(fd, buf, cap);
+}
+
+/**
+ * Issues one HTTP/1.1 JSON request to the index and parses its reply.
+ * @param ctx           Context for error details, or NULL.
+ * @param phase         Diagnostic phase prefix.
+ * @param host          Index host.
+ * @param port          Index port.
+ * @param request       Request JSON value, serialized but not freed here.
+ * @param response_out  Optional output JSON value owned by the caller.
+ * @return REDP2P_OK on success, or a negative error code on failure.
+ */
+static int redp2p_http_client(redp2p_t *ctx, const char *phase,
+    const char *host, unsigned short port, JSON_Value *request,
+    JSON_Value **response_out)
+{
+    char head[REDP2P_HTTP_LINE_MAX * 6];
+    char body[REDP2P_HTTP_BODY_MAX + 1];
+    char line[REDP2P_HTTP_LINE_MAX];
+    redp2p_fd_t fd;
+    size_t body_size;
+    long content_length;
+    int status;
+    int line_result;
+    int off;
+    int i;
+    int n;
+
+    if (!phase || !host || !host[0] || port == 0 || !request)
+        return REDP2P_EINVAL;
+    if (response_out) *response_out = NULL;
+    body_size = json_serialization_size(request);
+    if (body_size == 0 || body_size > sizeof(body)) {
+        redp2p_set_error(ctx, "%s: index request is too large", phase);
+        return REDP2P_EPROTO;
+    }
+    fd = redp2p_tcp_connect(host, port);
     if (REDP2P_ISERR(fd)) {
-        redp2p_set_error(ctx, "%s: control connect %s:%u failed", phase,
-            index_host, (unsigned)index_port);
-        return fd;
+        redp2p_set_error(ctx, "%s: index connect %s:%u failed",
+            phase, host, (unsigned)port);
+        return REDP2P_ENET;
     }
-    if (redp2p_tcp_send(fd, REDP2P_CTRTOK_HELLO) != REDP2P_OK) {
-        redp2p_set_error(ctx, "%s: control version write failed", phase);
+    if (json_serialize_to_buffer(request, body, sizeof(body)) != JSONSuccess) {
         REDP2P_FD_CLOSE(fd);
-        return REDP2P_FD_INVALID;
+        redp2p_set_error(ctx, "%s: index request serialization failed", phase);
+        return REDP2P_ERROR;
     }
-    line_result = redp2p_tcp_readline(fd, reply, (int)sizeof(reply), 5);
+    n = snprintf(head, sizeof(head),
+        "POST /redp2p/ HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "Content-Length: %u\r\n"
+        "Content-Type: application/json\r\n"
+        "Connection: close\r\n"
+        "\r\n", host, (unsigned)(body_size - 1));
+    if (n < 0 || (size_t)n >= sizeof(head) ||
+        redp2p_write_all(fd, head, n) != 0 ||
+        redp2p_write_all(fd, body, (int)(body_size - 1)) != 0)
+    {
+        REDP2P_FD_CLOSE(fd);
+        redp2p_set_error(ctx, "%s: index request write failed", phase);
+        return REDP2P_ENET;
+    }
+    line_result = redp2p_tcp_readline(fd, line, (int)sizeof(line),
+        REDP2P_HTTP_TIMEOUT_S);
     if (line_result < 0) {
-        if (line_result == -1) {
-            if (result) *result = REDP2P_ETIMEOUT;
-            redp2p_set_error(ctx, "%s: control version response timed out",
-                phase);
-        } else if (line_result == -3 || line_result == -4) {
-            if (result) *result = REDP2P_EPROTO;
-            redp2p_set_error(ctx, "%s: malformed control version response",
-                phase);
-        } else {
-            redp2p_set_error(ctx, "%s: control version response failed", phase);
+        REDP2P_FD_CLOSE(fd);
+        redp2p_set_error(ctx, line_result == -1 ?
+            "%s: index response timed out" : "%s: index response failed",
+            phase);
+        return line_result == -1 ? REDP2P_ETIMEOUT : REDP2P_ENET;
+    }
+    if (strncmp(line, "HTTP/", 5) != 0) {
+        REDP2P_FD_CLOSE(fd);
+        redp2p_set_error(ctx, "%s: malformed index status line", phase);
+        return REDP2P_EPROTO;
+    }
+    {
+        const char *cursor;
+        int d;
+
+        cursor = strchr(line, ' ');
+        status = 0;
+        if (!cursor) {
+            REDP2P_FD_CLOSE(fd);
+            redp2p_set_error(ctx, "%s: malformed index status line", phase);
+            return REDP2P_EPROTO;
         }
-        REDP2P_FD_CLOSE(fd);
-        return REDP2P_FD_INVALID;
+        while (*cursor == ' ') cursor++;
+        for (d = 0; d < 3 && cursor[d] >= '0' && cursor[d] <= '9'; d++)
+            status = status * 10 + (cursor[d] - '0');
+        if (d != 3) {
+            REDP2P_FD_CLOSE(fd);
+            redp2p_set_error(ctx, "%s: malformed index status line", phase);
+            return REDP2P_EPROTO;
+        }
     }
-    if (strcmp(reply, REDP2P_CTRTOK_ERROR_VERSION_MISMATCH) == 0) {
-        if (result) *result = REDP2P_EVERSION;
-        redp2p_set_error(ctx, "%s: index control version mismatch", phase);
-        REDP2P_FD_CLOSE(fd);
-        return REDP2P_FD_INVALID;
+    content_length = -1;
+    for (i = 0; i < REDP2P_HTTP_HEADERS_MAX; i++) {
+        char *colon;
+
+        line_result = redp2p_tcp_readline(fd, line, (int)sizeof(line),
+            REDP2P_HTTP_TIMEOUT_S);
+        if (line_result < 0) {
+            REDP2P_FD_CLOSE(fd);
+            redp2p_set_error(ctx, line_result == -1 ?
+                "%s: index response timed out" : "%s: index response failed",
+                phase);
+            return line_result == -1 ? REDP2P_ETIMEOUT : REDP2P_ENET;
+        }
+        if (line_result == 0) break;
+        colon = strchr(line, ':');
+        if (colon) {
+            char name[32];
+            const char *value;
+
+            if ((size_t)(colon - line) >= sizeof(name)) {
+                REDP2P_FD_CLOSE(fd);
+                redp2p_set_error(ctx, "%s: malformed index response headers",
+                    phase);
+                return REDP2P_EPROTO;
+            }
+            memcpy(name, line, (size_t)(colon - line));
+            name[colon - line] = '\0';
+            value = colon + 1;
+            while (*value == ' ' || *value == '\t') value++;
+            if (redp2p_ascii_casecmp(name, "Content-Length") == 0) {
+                if (!redp2p_parse_u(value, 0, REDP2P_HTTP_BODY_MAX,
+                    &content_length))
+                {
+                    REDP2P_FD_CLOSE(fd);
+                    redp2p_set_error(ctx,
+                        "%s: malformed index response length", phase);
+                    return REDP2P_EPROTO;
+                }
+            } else if (redp2p_ascii_casecmp(name, "Transfer-Encoding") == 0) {
+                REDP2P_FD_CLOSE(fd);
+                redp2p_set_error(ctx,
+                    "%s: unsupported index response encoding", phase);
+                return REDP2P_EPROTO;
+            }
+        }
     }
-    if (strcmp(reply, REDP2P_CTRTOK_HELLO_OK) != 0) {
-        if (result) *result = REDP2P_EPROTO;
-        redp2p_set_error(ctx, "%s: malformed control version response: %s",
-            phase, reply);
-        REDP2P_FD_CLOSE(fd);
-        return REDP2P_FD_INVALID;
+    if (content_length < 0) content_length = 0;
+    off = 0;
+    while (off < content_length) {
+        line_result = redp2p_http_read_some(fd, body + off,
+            (int)content_length - off);
+        if (line_result <= 0) {
+            REDP2P_FD_CLOSE(fd);
+            redp2p_set_error(ctx, line_result == -1 ?
+                "%s: index response timed out" : "%s: index response failed",
+                phase);
+            return line_result == -1 ? REDP2P_ETIMEOUT : REDP2P_ENET;
+        }
+        off += line_result;
     }
-    if (result) *result = REDP2P_OK;
-    return fd;
+    body[off] = '\0';
+    REDP2P_FD_CLOSE(fd);
+    if (status == 200) {
+        JSON_Value *parsed;
+
+        parsed = json_parse_string(body);
+        if (!parsed || json_value_get_type(parsed) != JSONObject) {
+            if (parsed) json_value_free(parsed);
+            redp2p_set_error(ctx, "%s: malformed index response", phase);
+            return REDP2P_EPROTO;
+        }
+        if (response_out) *response_out = parsed;
+        else json_value_free(parsed);
+        return REDP2P_OK;
+    }
+    {
+        JSON_Value *parsed;
+        char code[REDP2P_HTTP_LINE_MAX];
+        const char *code_ref;
+
+        parsed = json_parse_string(body);
+        code_ref = NULL;
+        if (parsed) {
+            if (json_value_get_type(parsed) == JSONObject)
+                code_ref = json_object_get_string(json_value_get_object(parsed),
+                    "error");
+            if (code_ref) {
+                snprintf(code, sizeof(code), "%s", code_ref);
+                code_ref = code;
+            }
+            json_value_free(parsed);
+        }
+        if (code_ref)
+            redp2p_set_error(ctx, "%s: index request failed (%s)", phase,
+                code_ref);
+        else
+            redp2p_set_error(ctx, "%s: index request failed (HTTP %d)", phase,
+                status);
+        return code_ref ? redp2p_http_map_error(code_ref) :
+            (status == 503 ? REDP2P_EFULL : REDP2P_EPROTO);
+    }
+}
+
+/**
+ * Writes one HTTP/1.1 response and closes semantics for the caller.
+ * @param fd           Socket to write.
+ * @param status       HTTP status code.
+ * @param reason       Status reason phrase.
+ * @param content_type Response Content-Type.
+ * @param body         Response body.
+ * @return REDP2P_OK on success, or a negative error code.
+ */
+static int redp2p_http_write_response(redp2p_fd_t fd, int status,
+    const char *reason, const char *content_type, const char *body)
+{
+    char head[REDP2P_HTTP_LINE_MAX * 6];
+    int n;
+
+    if (!reason || !content_type || !body) return REDP2P_EINVAL;
+    n = snprintf(head, sizeof(head),
+        "HTTP/1.1 %d %s\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %d\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        status, reason, content_type, (int)strlen(body));
+    if (n < 0 || (size_t)n >= sizeof(head)) return REDP2P_ERROR;
+    if (redp2p_write_all(fd, head, n) != 0) return REDP2P_ENET;
+    if (redp2p_write_all(fd, body, (int)strlen(body)) != 0) return REDP2P_ENET;
+    return REDP2P_OK;
 }
 
 /**
@@ -2413,13 +2672,13 @@ int redp2p_open(redp2p_t **out) {
     ctx->bind_port = 0;
     ctx->explicit_port = 0;
     ctx->proto = REDP2P_PROTO_TCP;
-    ctx->n_pow_challenges = 0;
-    ctx->conns = NULL;
-    ctx->n_conns = 0;
-    ctx->conns_cap = 0;
     ctx->vips = NULL;
     ctx->n_vips = 0;
     ctx->vips_cap = 0;
+    ctx->conns = NULL;
+    ctx->n_conns = 0;
+    ctx->conns_cap = 0;
+    ctx->n_pending_calls = 0;
     ctx->stop_requested = 0;
 #ifdef _WIN32
     InitializeCriticalSection(&ctx->mutex);
@@ -2438,11 +2697,11 @@ int redp2p_open(redp2p_t **out) {
 int redp2p_close(redp2p_t *ctx) {
     int i;
     if (!ctx) return REDP2P_ERROR;
-    for (i = 0; i < ctx->n_conns; i++)
-        REDP2P_FD_CLOSE(ctx->conns[i].fd);
-    if (ctx->conns)
-        crypto_wipe(ctx->conns, (size_t)ctx->conns_cap * sizeof(*ctx->conns));
-    free(ctx->conns);
+    if (ctx->conns) {
+        for (i = 0; i < ctx->n_conns; i++)
+            REDP2P_FD_CLOSE(ctx->conns[i].fd);
+        free(ctx->conns);
+    }
     if (ctx->vips)
         crypto_wipe(ctx->vips, ctx->vips_cap * sizeof(*ctx->vips));
     free(ctx->vips);
@@ -2839,6 +3098,20 @@ static void redp2p_evict_stale(redp2p_t *ctx) {
 }
 
 /**
+ * Reports whether one peer record is expired by TTL.
+ * @param ctx   Open index context.
+ * @param index Peer index.
+ * @return 1 when expired or out of range, 0 when fresh.
+ */
+static int redp2p_peer_is_stale(redp2p_t *ctx, size_t index) {
+    uint64_t now;
+
+    if (index >= ctx->n_peers) return 1;
+    now = redp2p_now_s();
+    return now - ctx->peers[index].last_seen > REDP2P_ETIMEOUT_SEC;
+}
+
+/**
  * Generate key.
  * @return Status code.
  */
@@ -2865,8 +3138,6 @@ static int redp2p_add_peer(redp2p_t *ctx, const char *id)
     idx = redp2p_find_peer(ctx, id);
     if (idx != SIZE_MAX) {
         ctx->peers[idx].last_seen = redp2p_now_s();
-        if (!redp2p_generate_key(ctx->peers[idx].key))
-            return REDP2P_ERROR;
         return REDP2P_OK;
     }
 
@@ -2890,6 +3161,9 @@ static int redp2p_add_peer(redp2p_t *ctx, const char *id)
     ctx->peers[ctx->n_peers].last_seen = redp2p_now_s();
     if (!redp2p_generate_key(ctx->peers[ctx->n_peers].key))
         return REDP2P_ERROR;
+    ctx->peers[ctx->n_peers].proto = 0;
+    ctx->peers[ctx->n_peers].udp_port = 0;
+    ctx->peers[ctx->n_peers].n_candidates = 0;
     ctx->n_peers++;
     return REDP2P_OK;
 }
@@ -2912,255 +3186,114 @@ static int redp2p_remove_peer(redp2p_t *ctx, const char *id) {
 }
 
 /**
- * Refreshes one existing peer entry.
- * @param ctx  Open context.
- * @param id   Peer identifier.
- * @param addr Peer address.
- * @param port Peer port.
- * @return 0 on success, -1 on error.
+ * Removes one pending call by index.
+ * @param ctx Open index context.
+ * @param idx Pending call index.
+ * @return None.
  */
-static int redp2p_refresh_peer(redp2p_t *ctx, const char *id)
-{
-    size_t idx;
-
-    idx = redp2p_find_peer(ctx, id);
-    if (idx == SIZE_MAX) return REDP2P_ENOENT;
-    ctx->peers[idx].last_seen = redp2p_now_s();
-    return REDP2P_OK;
+static void redp2p_pending_call_remove(redp2p_t *ctx, int idx) {
+    if (idx < 0 || idx >= ctx->n_pending_calls) return;
+    ctx->pending_calls[idx] = ctx->pending_calls[--ctx->n_pending_calls];
+    crypto_wipe(&ctx->pending_calls[ctx->n_pending_calls],
+        sizeof(ctx->pending_calls[ctx->n_pending_calls]));
 }
 
 /**
- * Finds one pending register challenge.
- * @param ctx     Open context.
- * @param peer_sa Remote peer address.
- * @return Challenge index on success, -1 on failure.
+ * Copies a bounded string with NUL termination.
+ * @param dst    Destination buffer.
+ * @param dst_cap Destination capacity.
+ * @param src    Source string.
+ * @return None.
  */
-static int redp2p_find_pow_challenge(redp2p_t *ctx,
-    const struct sockaddr_storage *peer_sa)
-{
-    int i;
+static void redp2p_bounded_copy(char *dst, size_t dst_cap, const char *src) {
+    size_t len;
 
-    for (i = 0; i < ctx->n_pow_challenges; i++) {
-        if (redp2p_sockaddr_equal(&ctx->pow_challenges[i].addr, peer_sa))
-            return i;
+    if (!dst || dst_cap == 0) return;
+    if (!src) {
+        dst[0] = '\0';
+        return;
     }
-    return -1;
+    len = strlen(src);
+    if (len >= dst_cap) len = dst_cap - 1;
+    memcpy(dst, src, len);
+    dst[len] = '\0';
 }
 
 /**
- * Removes one pending register challenge.
- * @param ctx Open context.
- * @param idx Challenge index.
+ * Evicts expired pending calls.
+ * @param ctx Open index context.
  * @return None.
  */
-static void redp2p_remove_pow_challenge(redp2p_t *ctx, int idx) {
-    if (!ctx || idx < 0 || idx >= ctx->n_pow_challenges) return;
-    if (idx < ctx->n_pow_challenges - 1)
-        ctx->pow_challenges[idx] = ctx->pow_challenges[ctx->n_pow_challenges - 1];
-    ctx->n_pow_challenges--;
-}
-
-/**
- * Evicts expired pending register challenges.
- * @param ctx Open context.
- * @param now Current monotonic time in seconds.
- * @return None.
- */
-static void redp2p_evict_pow_challenges(redp2p_t *ctx, uint64_t now) {
+static void redp2p_pending_call_evict_stale(redp2p_t *ctx) {
+    uint64_t now;
     int i;
 
-    if (!ctx) return;
-    for (i = ctx->n_pow_challenges - 1; i >= 0; i--) {
-        if (ctx->pow_challenges[i].expires_at != 0 &&
-            now >= ctx->pow_challenges[i].expires_at)
-            redp2p_remove_pow_challenge(ctx, i);
+    now = redp2p_now_s();
+    for (i = 0; i < ctx->n_pending_calls; ) {
+        if (now - ctx->pending_calls[i].ts > REDP2P_PENDING_CALL_TTL_S) {
+            redp2p_pending_call_remove(ctx, i);
+        } else {
+            i++;
+        }
     }
 }
 
 /**
- * Stores one pending register challenge.
- * @param ctx       Open context.
- * @param peer_sa   Remote peer address.
- * @param id        Challenged service identifier.
- * @param nonce_hex Challenge nonce in hex.
- * @return 1 on success, 0 on failure.
+ * Adds one bounded pending call.
+ * @param ctx          Open index context.
+ * @param caller_id    Requesting consumer identifier.
+ * @param target_id    Target publisher identifier.
+ * @param sess_id      Session identifier.
+ * @param candidates   Caller candidate array.
+ * @param n_candidates Caller candidate count.
+ * @return 1 on success, 0 when the pending call store is full.
  */
-static int redp2p_store_pow_challenge(redp2p_t *ctx,
-    const struct sockaddr_storage *peer_sa, const char *id, const char *nonce_hex)
+static int redp2p_pending_call_add(redp2p_t *ctx, const char *caller_id,
+    const char *target_id, const char *sess_id,
+    const redp2p_candidate_t *candidates, int n_candidates)
 {
     int idx;
-    size_t id_len;
-    size_t nonce_len;
 
-    idx = redp2p_find_pow_challenge(ctx, peer_sa);
-    if (idx < 0) {
-        if (ctx->n_pow_challenges >= REDP2P_POW_CHALLENGES_MAX) return 0;
-        idx = ctx->n_pow_challenges++;
+    if (ctx->n_pending_calls >= REDP2P_MAX_PENDING_CALLS) return 0;
+    idx = ctx->n_pending_calls++;
+    redp2p_bounded_copy(ctx->pending_calls[idx].caller_id,
+        sizeof(ctx->pending_calls[idx].caller_id), caller_id);
+    redp2p_bounded_copy(ctx->pending_calls[idx].target_id,
+        sizeof(ctx->pending_calls[idx].target_id), target_id);
+    redp2p_bounded_copy(ctx->pending_calls[idx].sess_id,
+        sizeof(ctx->pending_calls[idx].sess_id), sess_id);
+    ctx->pending_calls[idx].n_candidates = n_candidates;
+    if (n_candidates > 0) {
+        memcpy(ctx->pending_calls[idx].candidates, candidates,
+            (size_t)n_candidates * sizeof(candidates[0]));
     }
-    nonce_len = strlen(nonce_hex);
-    if (nonce_len > sizeof(ctx->pow_challenges[idx].nonce_hex) - 1)
-        nonce_len = sizeof(ctx->pow_challenges[idx].nonce_hex) - 1;
-    memcpy(ctx->pow_challenges[idx].nonce_hex, nonce_hex, nonce_len);
-    ctx->pow_challenges[idx].nonce_hex[nonce_len] = '\0';
-    ctx->pow_challenges[idx].nonce_hex[16] = '\0';
-    id_len = strlen(id);
-    if (id_len > sizeof(ctx->pow_challenges[idx].id) - 1)
-        id_len = sizeof(ctx->pow_challenges[idx].id) - 1;
-    memcpy(ctx->pow_challenges[idx].id, id, id_len);
-    ctx->pow_challenges[idx].id[id_len] = '\0';
-    ctx->pow_challenges[idx].id[REDP2P_ID_MAX] = '\0';
-    ctx->pow_challenges[idx].addr = *peer_sa;
-    ctx->pow_challenges[idx].issued_at = redp2p_now_s();
-    ctx->pow_challenges[idx].expires_at =
-        ctx->pow_challenges[idx].issued_at + REDP2P_POW_CHALLENGE_TTL_S;
+    ctx->pending_calls[idx].ts = redp2p_now_s();
     return 1;
 }
 
 /**
- * Formats one successful register reply.
- * @param ctx      Open context.
- * @param id       Registered service identifier.
- * @param reply    Output reply buffer.
- * @param reply_sz Output reply capacity.
- * @return 1 on success, 0 on failure.
- */
-static int redp2p_format_register_ok(redp2p_t *ctx, const char *id,
-    char *reply, size_t reply_sz)
-{
-    size_t pidx;
-
-    pidx = redp2p_find_peer(ctx, id);
-    if (pidx == SIZE_MAX) return 0;
-    snprintf(reply, reply_sz, "%s%s", REDP2P_CTRTOK_OK_KEY,
-        ctx->peers[pidx].key);
-    return 1;
-}
-
-/**
- * Conn add.
- * @return 0 on success, -1 on error.
- */
-static int redp2p_conn_add(redp2p_t *ctx, redp2p_fd_t fd) {
-#ifdef _WIN32
-    if (fd == INVALID_SOCKET) return REDP2P_ERROR;
-#else
-    if (fd < 0) return REDP2P_ERROR;
-    if (fd >= FD_SETSIZE) return REDP2P_ERROR;
-#endif
-    if (ctx->n_conns >= ctx->conns_cap) {
-        int new_cap = ctx->conns_cap == 0 ? 64 : ctx->conns_cap * 2;
-        redp2p_tcp_conn_t *c = (redp2p_tcp_conn_t *)realloc(
-            ctx->conns, (size_t)new_cap * sizeof(redp2p_tcp_conn_t));
-        if (!c) return REDP2P_ERROR;
-        ctx->conns = c;
-        ctx->conns_cap = new_cap;
-    }
-    ctx->conns[ctx->n_conns].fd = fd;
-    ctx->conns[ctx->n_conns].buf_len = 0;
-    ctx->conns[ctx->n_conns].id[0] = '\0';
-    ctx->conns[ctx->n_conns].registered = 0;
-    ctx->conns[ctx->n_conns].hello_ok = 0;
-    ctx->n_conns++;
-    return REDP2P_OK;
-}
-
-/**
- * Conn remove.
- * @return Status code.
- */
-static void redp2p_conn_remove(redp2p_t *ctx, int idx) {
-    if (idx < 0 || idx >= ctx->n_conns) return;
-    redp2p_fd_t fd = ctx->conns[idx].fd;
-    REDP2P_FD_CLOSE(fd);
-    for (int pi = 0; pi < ctx->n_pending_punches; pi++) {
-        if (ctx->pending_punches[pi].consumer_fd == fd) {
-            ctx->pending_punches[pi] = ctx->pending_punches[--ctx->n_pending_punches];
-            pi--;
-        }
-    }
-    if (idx < ctx->n_conns - 1) {
-        memmove(&ctx->conns[idx], &ctx->conns[idx + 1],
-            (size_t)(ctx->n_conns - idx - 1) * sizeof(ctx->conns[0]));
-    }
-    ctx->n_conns--;
-}
-
-/**
- * Transfers one registered identifier to its latest control connection.
- * @param ctx Open index context.
- * @param owner Connection receiving ownership.
- * @param id Registered identifier.
+ * Collects and consumes all pending calls for one publisher identifier.
+ * @param ctx       Open index context.
+ * @param target_id Target publisher identifier.
+ * @param out       Output pending call array.
+ * @param out_n     Output pending call count.
  * @return None.
  */
-static void redp2p_conn_claim_registration(redp2p_t *ctx,
-    redp2p_tcp_conn_t *owner, const char *id)
+static void redp2p_pending_call_take_all(redp2p_t *ctx,
+    const char *target_id, redp2p_pending_call_t *out, int *out_n)
 {
     int i;
 
-    for (i = 0; i < ctx->n_conns; i++) {
-        if (&ctx->conns[i] == owner) continue;
-        if (ctx->conns[i].registered &&
-            strcmp(ctx->conns[i].id, id) == 0)
-            ctx->conns[i].registered = 0;
-    }
-    strcpy(owner->id, id);
-    owner->registered = 1;
-}
-
-/**
- * Pending punch find.
- * @return index on success, -1 on error.
- */
-static int redp2p_pending_punch_find(redp2p_t *ctx, const char *target_id, const char *self_id, const char *sess_id) {
-    for (int i = 0; i < ctx->n_pending_punches; i++) {
-        if (strcmp(ctx->pending_punches[i].target_id, target_id) == 0 &&
-            strcmp(ctx->pending_punches[i].self_id, self_id) == 0 &&
-            strcmp(ctx->pending_punches[i].sess_id, sess_id) == 0)
-            return i;
-    }
-    return -1;
-}
-
-/**
- * Pending punch remove.
- * @return None.
- */
-static void redp2p_pending_punch_remove(redp2p_t *ctx, int idx) {
-    if (idx >= 0 && idx < ctx->n_pending_punches)
-        ctx->pending_punches[idx] = ctx->pending_punches[--ctx->n_pending_punches];
-}
-
-/**
- * Pending punch evict stale.
- * @return None.
- */
-static void redp2p_pending_punch_evict_stale(redp2p_t *ctx) {
-    uint64_t now = redp2p_now_s();
-    for (int i = 0; i < ctx->n_pending_punches; i++) {
-        if (now - ctx->pending_punches[i].ts > 30) {
-            ctx->pending_punches[i] = ctx->pending_punches[--ctx->n_pending_punches];
-            i--;
+    *out_n = 0;
+    for (i = 0; i < ctx->n_pending_calls; ) {
+        if (strcmp(ctx->pending_calls[i].target_id, target_id) == 0) {
+            out[*out_n] = ctx->pending_calls[i];
+            (*out_n)++;
+            redp2p_pending_call_remove(ctx, i);
+        } else {
+            i++;
         }
     }
-}
-
-/**
- * Appends text to a bounded output buffer.
- * @param out Output buffer.
- * @param cap Output buffer capacity.
- * @param text Text to append.
- * @return 1 on success, 0 on overflow.
- */
-static int redp2p_append_text(char *out, size_t cap, const char *text) {
-    size_t used;
-    size_t add;
-
-    if (!out || !text || cap == 0) return 0;
-    used = strlen(out);
-    add = strlen(text);
-    if (used >= cap || add >= cap - used) return 0;
-    memcpy(out + used, text, add + 1);
-    return 1;
 }
 
 /**
@@ -3245,20 +3378,6 @@ static int redp2p_is_punch_id(const char *text) {
             (text[i] >= '0' && text[i] <= '9') || text[i] == '-'))
             return 0;
     }
-    return 1;
-}
-
-/**
- * Parses one strict decimal TCP or UDP port.
- * @param text Input token.
- * @param port Output port.
- * @return 1 on success, 0 on malformed input.
- */
-static int redp2p_parse_port_token(const char *text, unsigned short *port) {
-    long value;
-
-    if (!port || !redp2p_parse_u(text, 1, 65535, &value)) return 0;
-    *port = (unsigned short)value;
     return 1;
 }
 
@@ -3411,484 +3530,6 @@ static int redp2p_normalize_candidates(redp2p_candidate_t *candidates,
     }
     *count = n;
     return 1;
-}
-
-/**
- * Parses one strict candidate line.
- * @param line Input line.
- * @param out  Output candidate.
- * @return 1 on success, 0 on malformed input.
- */
-static int redp2p_parse_candidate_line(const char *line,
-    redp2p_candidate_t *out)
-{
-    const char *cursor;
-    const char *end;
-    char type_text[16];
-    char addr[REDP2P_ADDR_MAX + 1];
-    char port_text[8];
-    struct in_addr ipv4;
-    struct in6_addr ipv6;
-    size_t addr_len;
-
-    if (!line || !out || strncmp(line, REDP2P_CTRTOK_CAND,
-        strlen(REDP2P_CTRTOK_CAND)) != 0)
-        return 0;
-    cursor = line + strlen(REDP2P_CTRTOK_CAND);
-    if (!redp2p_parse_field(&cursor, type_text, sizeof(type_text), ':'))
-        return 0;
-    if (*cursor == '[') {
-        cursor++;
-        end = strchr(cursor, ']');
-        if (!end || end[1] != ':') return 0;
-        addr_len = (size_t)(end - cursor);
-        if (addr_len == 0 || addr_len >= sizeof(addr)) return 0;
-        memcpy(addr, cursor, addr_len);
-        addr[addr_len] = '\0';
-        cursor = end + 2;
-    } else {
-        if (!redp2p_parse_field(&cursor, addr, sizeof(addr), ':'))
-            return 0;
-    }
-    if (!redp2p_parse_field(&cursor, port_text, sizeof(port_text), '\0'))
-        return 0;
-    if (*cursor != '\0') return 0;
-    if (!redp2p_parse_candidate_type(type_text, &out->type)) return 0;
-    if (inet_pton(AF_INET, addr, &ipv4) != 1 &&
-        inet_pton(AF_INET6, addr, &ipv6) != 1)
-        return 0;
-    if (!redp2p_parse_port_token(port_text, &out->port)) return 0;
-    snprintf(out->addr, sizeof(out->addr), "%s", addr);
-    out->priority = redp2p_candidate_priority(out);
-    if (out->priority >= 900u) return 0;
-    return 1;
-}
-
-/**
- * Finds a complete END-framed block after the current line.
- * @param start First byte after the command line.
- * @param limit One byte past available buffered data.
- * @param end   Output pointer after END line.
- * @return 1 when END is present, 0 otherwise.
- */
-static int redp2p_find_end_line(char *start, char *limit, char **end) {
-    char *cursor;
-    char *newline;
-
-    if (!start || !limit || !end) return 0;
-    cursor = start;
-    while (cursor < limit &&
-        (newline = (char *)memchr(cursor, '\n', (size_t)(limit - cursor))) != NULL)
-    {
-        size_t len = (size_t)(newline - cursor);
-        if (len == strlen(REDP2P_CTRTOK_END) &&
-            memcmp(cursor, REDP2P_CTRTOK_END, strlen(REDP2P_CTRTOK_END)) == 0) {
-            *end = newline + 1;
-            return 1;
-        }
-        cursor = newline + 1;
-    }
-    return 0;
-}
-
-/**
- * Parse remote candidates.
- * Summary: Parses candidate list from a buffer.
- * @param buf       Input buffer.
- * @param out       Output array.
- * @param out_count Output count.
- * @return 1 on success, 0 on malformed input.
- */
-static int redp2p_parse_remote_candidates(const char *buf,
-    redp2p_candidate_t *out, int *out_count)
-{
-    const char *p;
-
-    if (!buf || !out || !out_count) return 0;
-    *out_count = 0;
-    p = buf;
-    if (strncmp(p, REDP2P_CTRTOK_PUNCH_REQ2,
-        strlen(REDP2P_CTRTOK_PUNCH_REQ2)) == 0 ||
-        strncmp(p, REDP2P_CTRTOK_PUNCH_OK2,
-        strlen(REDP2P_CTRTOK_PUNCH_OK2)) == 0 ||
-        strncmp(p, REDP2P_CTRTOK_PUNCH_CALL2,
-        strlen(REDP2P_CTRTOK_PUNCH_CALL2)) == 0)
-    {
-        p = strchr(p, '\n');
-        if (!p) return 0;
-        p++;
-    }
-    while (p && *p) {
-        const char *nl = strchr(p, '\n');
-        char line[128];
-        size_t len;
-
-        if (!nl) return 0;
-        len = (size_t)(nl - p);
-        if (len == 0) return 0;
-        if (len == strlen(REDP2P_CTRTOK_END) &&
-            memcmp(p, REDP2P_CTRTOK_END, strlen(REDP2P_CTRTOK_END)) == 0)
-            return *out_count > 0 &&
-                redp2p_normalize_candidates(out, out_count);
-        if (len >= sizeof(line)) return 0;
-        if (!redp2p_control_bytes_valid(p, len)) return 0;
-        memcpy(line, p, len);
-        line[len] = '\0';
-        if (strncmp(line, REDP2P_CTRTOK_CAND,
-            strlen(REDP2P_CTRTOK_CAND)) != 0)
-            return 0;
-        if (*out_count >= REDP2P_CANDIDATES_MAX) return 0;
-        if (!redp2p_parse_candidate_line(line, &out[*out_count])) return 0;
-        (*out_count)++;
-        p = nl + 1;
-    }
-    return 0;
-}
-
-/**
- * Appends one validated candidate line to a control message.
- * @param msg  Output message buffer.
- * @param cap  Output message capacity.
- * @param line Candidate line.
- * @return 1 on success, 0 on malformed input or overflow.
- */
-static int redp2p_append_candidate_line(char *msg, size_t cap,
-    const char *line)
-{
-    redp2p_candidate_t candidate;
-
-    if (!redp2p_parse_candidate_line(line, &candidate)) return 0;
-    if (!redp2p_append_text(msg, cap, line)) return 0;
-    if (!redp2p_append_text(msg, cap, "\n")) return 0;
-    return 1;
-}
-
-/**
- * Appends a bounded local candidate line.
- * @param msg       Output message buffer.
- * @param cap       Output message capacity.
- * @param candidate Candidate to append.
- * @return 1 on success, 0 on overflow.
- */
-static int redp2p_append_candidate(char *msg, size_t cap,
-    const redp2p_candidate_t *candidate)
-{
-    char cbuf[128];
-    int n;
-
-    if (!candidate) return 0;
-    if (strchr(candidate->addr, ':')) {
-        n = snprintf(cbuf, sizeof(cbuf), "%s%s:[%s]:%u\n",
-            REDP2P_CTRTOK_CAND, redp2p_candidate_type_name(candidate->type),
-            candidate->addr, candidate->port);
-    } else {
-        n = snprintf(cbuf, sizeof(cbuf), "%s%s:%s:%u\n",
-            REDP2P_CTRTOK_CAND, redp2p_candidate_type_name(candidate->type),
-            candidate->addr, candidate->port);
-    }
-    if (n < 0 || (size_t)n >= sizeof(cbuf)) return 0;
-    return redp2p_append_text(msg, cap, cbuf);
-}
-
-/**
- * Copies validated CAND lines from one complete END-framed block.
- * @param cursor Input cursor after the command line.
- * @param end    One byte after END line.
- * @param msg    Output control message.
- * @param cap    Output control message capacity.
- * @return 1 on success, 0 on malformed input.
- */
-static int redp2p_copy_candidate_block(char *cursor, char *end, char *msg,
-    size_t cap)
-{
-    int count;
-
-    count = 0;
-    while (cursor < end) {
-        char *newline = (char *)memchr(cursor, '\n', (size_t)(end - cursor));
-        char line[128];
-        size_t len;
-
-        if (!newline) return 0;
-        len = (size_t)(newline - cursor);
-        if (len == strlen(REDP2P_CTRTOK_END) &&
-            memcmp(cursor, REDP2P_CTRTOK_END, strlen(REDP2P_CTRTOK_END)) == 0) {
-            if (count == 0) return 0;
-            return redp2p_append_text(msg, cap, REDP2P_CTRTOK_END "\n");
-        }
-        if (len == 0 || len >= sizeof(line)) return 0;
-        if (count >= REDP2P_CANDIDATES_MAX ||
-            !redp2p_control_bytes_valid(cursor, len))
-            return 0;
-        memcpy(line, cursor, len);
-        line[len] = '\0';
-        if (!redp2p_append_candidate_line(msg, cap, line)) return 0;
-        count++;
-        cursor = newline + 1;
-    }
-    return 0;
-}
-
-/**
- * Parses a REGISTER command without proof material.
- * @param line Input command line.
- * @param id   Output service id.
- * @return 1 on success, 0 on malformed input.
- */
-static int redp2p_parse_register_id(const char *line,
-    char id[REDP2P_ID_MAX + 1])
-{
-    const char *cursor;
-
-    if (!line || strncmp(line, REDP2P_CTRTOK_REGISTER,
-        strlen(REDP2P_CTRTOK_REGISTER)) != 0)
-        return 0;
-    cursor = line + strlen(REDP2P_CTRTOK_REGISTER);
-    if (!redp2p_parse_field(&cursor, id, REDP2P_ID_MAX + 1, '\0'))
-        return 0;
-    if (*cursor != '\0') return 0;
-    return redp2p_is_valid_id(id);
-}
-
-/**
- * Parses a REGISTER proof command.
- * @param line     Input command line.
- * @param id       Output service id.
- * @param solution Output solution token.
- * @param proof    Output proof token.
- * @return 1 on success, 0 on malformed input.
- */
-static int redp2p_parse_register_solution(const char *line,
-    char id[REDP2P_ID_MAX + 1], char solution[17], char proof[65])
-{
-    const char *cursor;
-
-    if (!line || strncmp(line, REDP2P_CTRTOK_REGISTER,
-        strlen(REDP2P_CTRTOK_REGISTER)) != 0)
-        return 0;
-    cursor = line + strlen(REDP2P_CTRTOK_REGISTER);
-    if (!redp2p_parse_field(&cursor, id, REDP2P_ID_MAX + 1, ':'))
-        return 0;
-    if (strncmp(cursor, REDP2P_CTRTOK_SOLUTION,
-        strlen(REDP2P_CTRTOK_SOLUTION)) != 0)
-        return 0;
-    cursor += strlen(REDP2P_CTRTOK_SOLUTION);
-    if (!redp2p_parse_field(&cursor, solution, 17, ':')) return 0;
-    if (strncmp(cursor, REDP2P_CTRTOK_PROOF,
-        strlen(REDP2P_CTRTOK_PROOF)) != 0)
-        return 0;
-    cursor += strlen(REDP2P_CTRTOK_PROOF);
-    if (!redp2p_parse_field(&cursor, proof, 65, '\0')) return 0;
-    if (*cursor != '\0') return 0;
-    if (!redp2p_is_valid_id(id)) return 0;
-    if (strlen(solution) == 0 || strlen(solution) > 16) return 0;
-    if (!redp2p_is_hex_token(solution, strlen(solution))) return 0;
-    if (!redp2p_is_hex_token(proof, 64)) return 0;
-    return 1;
-}
-
-/**
- * Parses a PUNCH_REQ2 command line.
- * @param line      Input command line.
- * @param self_id   Output requester id.
- * @param target_id Output target id.
- * @param sess_id   Output session id.
- * @return 1 on success, 0 on malformed input.
- */
-static int redp2p_parse_punch_req2(const char *line,
-    char self_id[REDP2P_ID_MAX + 1], char target_id[REDP2P_ID_MAX + 1],
-    char sess_id[REDP2P_CTRL_SESSION_MAX + 1])
-{
-    const char *cursor;
-
-    if (!line || strncmp(line, REDP2P_CTRTOK_PUNCH_REQ2,
-        strlen(REDP2P_CTRTOK_PUNCH_REQ2)) != 0)
-        return 0;
-    cursor = line + strlen(REDP2P_CTRTOK_PUNCH_REQ2);
-    if (!redp2p_parse_field(&cursor, self_id, REDP2P_ID_MAX + 1, ':'))
-        return 0;
-    if (!redp2p_parse_field(&cursor, target_id, REDP2P_ID_MAX + 1, ':'))
-        return 0;
-    if (!redp2p_parse_field(&cursor, sess_id, REDP2P_CTRL_SESSION_MAX + 1,
-        '\0'))
-        return 0;
-    if (*cursor != '\0') return 0;
-    return redp2p_is_punch_id(self_id) && redp2p_is_valid_id(target_id) &&
-        redp2p_is_session_token(sess_id);
-}
-
-/**
- * Parses a PUNCH_ACK2 command line.
- * @param line      Input command line.
- * @param self_id   Output publisher id.
- * @param target_id Output requester id.
- * @param sess_id   Output session id.
- * @return 1 on success, 0 on malformed input.
- */
-static int redp2p_parse_punch_ack2(const char *line,
-    char self_id[REDP2P_ID_MAX + 1], char target_id[REDP2P_ID_MAX + 1],
-    char sess_id[REDP2P_CTRL_SESSION_MAX + 1])
-{
-    const char *cursor;
-
-    if (!line || strncmp(line, REDP2P_CTRTOK_PUNCH_ACK2,
-        strlen(REDP2P_CTRTOK_PUNCH_ACK2)) != 0)
-        return 0;
-    cursor = line + strlen(REDP2P_CTRTOK_PUNCH_ACK2);
-    if (!redp2p_parse_field(&cursor, self_id, REDP2P_ID_MAX + 1, ':'))
-        return 0;
-    if (!redp2p_parse_field(&cursor, target_id, REDP2P_ID_MAX + 1, ':'))
-        return 0;
-    if (!redp2p_parse_field(&cursor, sess_id, REDP2P_CTRL_SESSION_MAX + 1,
-        '\0'))
-        return 0;
-    if (*cursor != '\0') return 0;
-    return redp2p_is_valid_id(self_id) && redp2p_is_punch_id(target_id) &&
-        redp2p_is_session_token(sess_id);
-}
-
-/**
- * Parses a PUNCH_CALL2 command line.
- * @param line    Input command line.
- * @param peer_id Output peer id.
- * @param sess_id Output session id.
- * @return 1 on success, 0 on malformed input.
- */
-static int redp2p_parse_punch_call2(const char *line,
-    char peer_id[REDP2P_ID_MAX + 1], char sess_id[REDP2P_CTRL_SESSION_MAX + 1])
-{
-    const char *cursor;
-
-    if (!line || strncmp(line, REDP2P_CTRTOK_PUNCH_CALL2,
-        strlen(REDP2P_CTRTOK_PUNCH_CALL2)) != 0)
-        return 0;
-    cursor = line + strlen(REDP2P_CTRTOK_PUNCH_CALL2);
-    if (!redp2p_parse_field(&cursor, peer_id, REDP2P_ID_MAX + 1, ':'))
-        return 0;
-    if (!redp2p_parse_field(&cursor, sess_id, REDP2P_CTRL_SESSION_MAX + 1,
-        '\0'))
-        return 0;
-    if (*cursor != '\0') return 0;
-    return redp2p_is_punch_id(peer_id) && redp2p_is_session_token(sess_id);
-}
-
-/**
- * Parses a PUNCH_OK2 command line.
- * @param line    Input command line.
- * @param peer_id Output peer id.
- * @param sess_id Output session id.
- * @return 1 on success, 0 on malformed input.
- */
-static int redp2p_parse_punch_ok2(const char *line,
-    char peer_id[REDP2P_ID_MAX + 1], char sess_id[REDP2P_CTRL_SESSION_MAX + 1])
-{
-    const char *cursor;
-
-    if (!line || strncmp(line, REDP2P_CTRTOK_PUNCH_OK2,
-        strlen(REDP2P_CTRTOK_PUNCH_OK2)) != 0)
-        return 0;
-    cursor = line + strlen(REDP2P_CTRTOK_PUNCH_OK2);
-    if (!redp2p_parse_field(&cursor, peer_id, REDP2P_ID_MAX + 1, ':'))
-        return 0;
-    if (!redp2p_parse_field(&cursor, sess_id, REDP2P_CTRL_SESSION_MAX + 1,
-        '\0'))
-        return 0;
-    if (*cursor != '\0') return 0;
-    return redp2p_is_punch_id(peer_id) && redp2p_is_session_token(sess_id);
-}
-
-/**
- * Parses a DEREGISTER command line.
- * @param line Input command line.
- * @param id   Output service id.
- * @param key  Output registration key.
- * @return 1 on success, 0 on malformed input.
- */
-static int redp2p_parse_deregister(const char *line,
-    char id[REDP2P_ID_MAX + 1], char key[REDP2P_KEY_STR_SZ])
-{
-    const char *cursor;
-
-    if (!line || strncmp(line, REDP2P_CTRTOK_DEREGISTER,
-        strlen(REDP2P_CTRTOK_DEREGISTER)) != 0)
-        return 0;
-    cursor = line + strlen(REDP2P_CTRTOK_DEREGISTER);
-    if (!redp2p_parse_field(&cursor, id, REDP2P_ID_MAX + 1, ':')) return 0;
-    if (strncmp(cursor, REDP2P_CTRTOK_KEY, strlen(REDP2P_CTRTOK_KEY)) != 0)
-        return 0;
-    cursor += strlen(REDP2P_CTRTOK_KEY);
-    if (!redp2p_parse_field(&cursor, key, REDP2P_KEY_STR_SZ, '\0'))
-        return 0;
-    if (*cursor != '\0') return 0;
-    return redp2p_is_valid_id(id) && redp2p_is_hex_token(key, REDP2P_KEY_SZ);
-}
-
-/**
- * Parses a LOOKUP command line.
- * @param line Input command line.
- * @param id   Output service id.
- * @return 1 on success, 0 on malformed input.
- */
-static int redp2p_parse_lookup(const char *line,
-    char id[REDP2P_ID_MAX + 1])
-{
-    const char *cursor;
-
-    if (!line || strncmp(line, REDP2P_CTRTOK_LOOKUP,
-        strlen(REDP2P_CTRTOK_LOOKUP)) != 0)
-        return 0;
-    cursor = line + strlen(REDP2P_CTRTOK_LOOKUP);
-    if (!redp2p_parse_field(&cursor, id, REDP2P_ID_MAX + 1, '\0'))
-        return 0;
-    if (*cursor != '\0') return 0;
-    return redp2p_is_valid_id(id);
-}
-
-/**
- * Parses a CHALLENGE response line.
- * @param line Input response line.
- * @param nonce Output nonce token.
- * @param bits Output difficulty bits.
- * @return 1 on success, 0 on malformed input.
- */
-static int redp2p_parse_challenge(const char *line, char nonce[17],
-    unsigned int *bits)
-{
-    const char *cursor;
-    char bits_text[16];
-    long value;
-
-    if (!line || !bits || strncmp(line, REDP2P_CTRTOK_CHALLENGE,
-        strlen(REDP2P_CTRTOK_CHALLENGE)) != 0)
-        return 0;
-    cursor = line + strlen(REDP2P_CTRTOK_CHALLENGE);
-    if (!redp2p_parse_field(&cursor, nonce, 17, ':')) return 0;
-    if (!redp2p_parse_field(&cursor, bits_text, sizeof(bits_text), '\0'))
-        return 0;
-    if (*cursor != '\0') return 0;
-    if (!redp2p_is_hex_token(nonce, 16)) return 0;
-    if (!redp2p_parse_u(bits_text, 0, 32, &value)) return 0;
-    *bits = (unsigned int)value;
-    return 1;
-}
-
-/**
- * Parses an OK registration response line.
- * @param line Input response line.
- * @param key  Output registration key.
- * @return 1 on success, 0 on malformed input.
- */
-static int redp2p_parse_ok_key(const char *line, char key[REDP2P_KEY_STR_SZ]) {
-    const char *cursor;
-
-    if (!line || strncmp(line, REDP2P_CTRTOK_OK_KEY,
-        strlen(REDP2P_CTRTOK_OK_KEY)) != 0)
-        return 0;
-    cursor = line + strlen(REDP2P_CTRTOK_OK_KEY);
-    if (!redp2p_parse_field(&cursor, key, REDP2P_KEY_STR_SZ, '\0'))
-        return 0;
-    if (*cursor != '\0') return 0;
-    return redp2p_is_hex_token(key, REDP2P_KEY_SZ);
 }
 
 /**
@@ -4446,11 +4087,984 @@ typedef struct {
     int platform_initialized;
 } redp2p_index_runtime_t;
 
-typedef enum {
-    REDP2P_INDEX_ACTION_KEEP,
-    REDP2P_INDEX_ACTION_REMOVE,
-    REDP2P_INDEX_ACTION_INCOMPLETE
-} redp2p_index_action_t;
+/**
+ * Appends one in-flight index connection to the bounded connection table.
+ * @param ctx Locked index context.
+ * @param fd  Socket whose descriptor ownership transfers on success.
+ * @return REDP2P_OK on success, or REDP2P_EFULL when the table is full.
+ */
+static int redp2p_index_conn_add(redp2p_t *ctx, redp2p_fd_t fd) {
+    redp2p_index_conn_t *new_conns;
+    int new_cap;
+
+    if (ctx->n_conns >= REDP2P_MAX_CONNECTIONS) return REDP2P_EFULL;
+    if (ctx->n_conns >= ctx->conns_cap) {
+        new_cap = ctx->conns_cap == 0 ? 16 : ctx->conns_cap * 2;
+        if (new_cap > REDP2P_MAX_CONNECTIONS) new_cap = REDP2P_MAX_CONNECTIONS;
+        new_conns = (redp2p_index_conn_t *)realloc(ctx->conns,
+            (size_t)new_cap * sizeof(*ctx->conns));
+        if (!new_conns) return REDP2P_ERROR;
+        ctx->conns = new_conns;
+        ctx->conns_cap = new_cap;
+    }
+    memset(&ctx->conns[ctx->n_conns], 0, sizeof(ctx->conns[ctx->n_conns]));
+    ctx->conns[ctx->n_conns].fd = fd;
+    ctx->conns[ctx->n_conns].ts = redp2p_now_ms();
+    ctx->n_conns++;
+    return REDP2P_OK;
+}
+
+/**
+ * Closes and removes one in-flight index connection by index.
+ * @param ctx   Locked index context.
+ * @param index Connection index to remove.
+ * @return None.
+ */
+static void redp2p_index_conn_remove(redp2p_t *ctx, int index) {
+    if (index < 0 || index >= ctx->n_conns) return;
+    REDP2P_FD_CLOSE(ctx->conns[index].fd);
+    ctx->conns[index] = ctx->conns[--ctx->n_conns];
+}
+
+/**
+ * Sends one JSON index response and releases the value.
+ * @param fd     Request socket.
+ * @param status HTTP status code.
+ * @param reason Status reason phrase.
+ * @param value  JSON response value, consumed.
+ * @return REDP2P_OK on success, or a negative error code.
+ */
+static int redp2p_index_respond(redp2p_fd_t fd, int status,
+    const char *reason, JSON_Value *value)
+{
+    char buf[REDP2P_BUF];
+    size_t size;
+    int result;
+
+    if (!value) return REDP2P_ERROR;
+    size = json_serialization_size(value);
+    if (size == 0 || size >= sizeof(buf)) {
+        json_value_free(value);
+        return REDP2P_EFULL;
+    }
+    if (json_serialize_to_buffer(value, buf, sizeof(buf)) != JSONSuccess) {
+        json_value_free(value);
+        return REDP2P_ERROR;
+    }
+    json_value_free(value);
+    result = redp2p_http_write_response(fd, status, reason,
+        "application/json", buf);
+    crypto_wipe(buf, sizeof(buf));
+    return result;
+}
+
+/**
+ * Sends one JSON index error reply.
+ * @param fd     Request socket.
+ * @param status HTTP status code.
+ * @param code   JSON error code.
+ * @return None.
+ */
+static void redp2p_index_respond_error(redp2p_fd_t fd, int status,
+    const char *code)
+{
+    const char *reason;
+    JSON_Value *value;
+    JSON_Object *obj;
+
+    switch (status) {
+        case 400: reason = "Bad Request"; break;
+        case 403: reason = "Forbidden"; break;
+        case 404: reason = "Not Found"; break;
+        case 500: reason = "Internal Server Error"; break;
+        case 503: reason = "Service Unavailable"; break;
+        default: reason = "Error"; break;
+    }
+    value = json_value_init_object();
+    if (!value) return;
+    obj = json_value_get_object(value);
+    json_object_set_boolean(obj, "ok", 0);
+    json_object_set_string(obj, "error", code);
+    redp2p_index_respond(fd, status, reason, value);
+}
+
+/**
+ * Rejects one JSON object containing duplicate field names.
+ * @param obj Request object.
+ * @return 1 when every field name is unique, 0 on a duplicate.
+ */
+static int redp2p_index_json_unique_fields(const JSON_Object *obj) {
+    size_t count;
+    size_t i;
+    size_t j;
+
+    count = json_object_get_count(obj);
+    for (i = 0; i < count; i++) {
+        const char *name;
+
+        name = json_object_get_name(obj, i);
+        for (j = i + 1; j < count; j++) {
+            if (strcmp(name, json_object_get_name(obj, j)) == 0) return 0;
+        }
+    }
+    return 1;
+}
+
+/**
+ * Extracts and validates one bounded identifier field.
+ * @param obj    Request object.
+ * @param field  Field name.
+ * @param id     Output identifier.
+ * @param id_cap Output identifier capacity.
+ * @return 1 on success, 0 when missing or of the wrong type, -1 when
+ *         present but invalid.
+ */
+static int redp2p_index_require_id(JSON_Object *obj, const char *field,
+    char *id, size_t id_cap)
+{
+    const char *value;
+
+    if (!json_object_has_value_of_type(obj, field, JSONString)) return 0;
+    value = json_object_get_string(obj, field);
+    if (!value || strlen(value) >= id_cap || !redp2p_is_valid_id(value)) return -1;
+    memcpy(id, value, strlen(value) + 1);
+    return 1;
+}
+
+/**
+ * Requires one valid identifier or replies with the matching error code.
+ * @param req    Request object.
+ * @param fd     Request socket.
+ * @param id     Output identifier.
+ * @param id_cap Output identifier capacity.
+ * @return 1 on success, 0 after replying.
+ */
+static int redp2p_index_require_id_response(JSON_Object *req,
+    redp2p_fd_t fd, char *id, size_t id_cap)
+{
+    int result;
+
+    result = redp2p_index_require_id(req, "id", id, id_cap);
+    if (result <= 0) {
+        redp2p_index_respond_error(fd, 400,
+            result == 0 ? "bad_request" : "invalid_id");
+        return 0;
+    }
+    return 1;
+}
+
+/**
+ * Extracts and validates one fixed-width hexadecimal token field.
+ * @param obj    Request object.
+ * @param field  Field name.
+ * @param out    Output token.
+ * @param out_cap Output token capacity.
+ * @param hex_len Required hex length.
+ * @return 1 on success, 0 on malformed input.
+ */
+static int redp2p_index_require_hex(JSON_Object *obj, const char *field,
+    char *out, size_t out_cap, size_t hex_len)
+{
+    const char *value;
+
+    if (!json_object_has_value_of_type(obj, field, JSONString)) return 0;
+    value = json_object_get_string(obj, field);
+    if (!value || out_cap <= hex_len || !redp2p_is_hex_token(value, hex_len))
+        return 0;
+    memcpy(out, value, hex_len);
+    out[hex_len] = '\0';
+    return 1;
+}
+
+/**
+ * Parses one bounded JSON candidate array into candidate records.
+ * @param obj       Request object.
+ * @param field     Array field name.
+ * @param out       Output candidate array.
+ * @param out_count Output candidate count.
+ * @return 1 on success, 0 on malformed input.
+ */
+static int redp2p_index_parse_candidates(JSON_Object *obj, const char *field,
+    redp2p_candidate_t *out, int *out_count)
+{
+    JSON_Array *array;
+    size_t count;
+    size_t i;
+
+    *out_count = 0;
+    if (!json_object_has_value_of_type(obj, field, JSONArray)) return 1;
+    array = json_object_get_array(obj, field);
+    count = json_array_get_count(array);
+    if (count > REDP2P_PEER_CANDIDATES_MAX) return 0;
+    for (i = 0; i < count; i++) {
+        JSON_Object *item;
+        const char *type_text;
+        const char *addr;
+        double port;
+        redp2p_candidate_type_t type;
+        struct in_addr ipv4;
+        struct in6_addr ipv6;
+
+        item = json_array_get_object(array, i);
+        if (!item) return 0;
+        type_text = json_object_get_string(item, "type");
+        addr = json_object_get_string(item, "addr");
+        if (!type_text || !addr || strlen(addr) > REDP2P_ADDR_MAX) return 0;
+        if (!redp2p_parse_candidate_type(type_text, &type)) return 0;
+        if (type != REDP2P_CAND_HOST && type != REDP2P_CAND_LAN &&
+            type != REDP2P_CAND_PUBLIC && type != REDP2P_CAND_SRFLX)
+            return 0;
+        if (inet_pton(AF_INET, addr, &ipv4) != 1 &&
+            inet_pton(AF_INET6, addr, &ipv6) != 1)
+            return 0;
+        if (!json_object_has_value_of_type(item, "port", JSONNumber)) return 0;
+        port = json_object_get_number(item, "port");
+        if (port < 1.0 || port > 65535.0) return 0;
+        memset(&out[*out_count], 0, sizeof(out[*out_count]));
+        out[*out_count].type = type;
+        snprintf(out[*out_count].addr, sizeof(out[*out_count].addr), "%s",
+            addr);
+        out[*out_count].port = (unsigned short)port;
+        out[*out_count].priority = redp2p_candidate_priority(
+            &out[*out_count]);
+        (*out_count)++;
+    }
+    return 1;
+}
+
+/**
+ * Appends one candidate array to a JSON reply object.
+ * @param obj   Reply object.
+ * @param field Output array field name.
+ * @param cands Candidate array.
+ * @param n     Candidate count.
+ * @return None.
+ */
+static void redp2p_index_append_candidates(JSON_Object *obj,
+    const char *field, const redp2p_candidate_t *cands, int n)
+{
+    JSON_Value *array_value;
+    JSON_Array *array;
+    int i;
+
+    array_value = json_value_init_array();
+    array = json_value_get_array(array_value);
+    for (i = 0; i < n; i++) {
+        JSON_Value *item_value;
+        JSON_Object *item;
+
+        item_value = json_value_init_object();
+        item = json_value_get_object(item_value);
+        json_object_set_string(item, "type",
+            redp2p_candidate_type_name(cands[i].type));
+        json_object_set_string(item, "addr", cands[i].addr);
+        json_object_set_number(item, "port", (double)cands[i].port);
+        json_array_append_value(array, item_value);
+    }
+    json_object_set_value(obj, field, array_value);
+}
+
+/**
+ * Handles one challenge request, issuing a stateless proof challenge.
+ * @param ctx Locked index context.
+ * @param fd  Request socket.
+ * @param req Request JSON object.
+ * @return None.
+ */
+static void redp2p_index_handle_challenge(redp2p_t *ctx, redp2p_fd_t fd,
+    JSON_Object *req)
+{
+    char id[REDP2P_ID_MAX + 1];
+    unsigned char nonce[8];
+    char nonce_hex[17];
+    JSON_Value *reply;
+    JSON_Object *out;
+
+    memset(nonce, 0, sizeof(nonce));
+    memset(nonce_hex, 0, sizeof(nonce_hex));
+    if (!redp2p_index_require_id_response(req, fd, id, sizeof(id))) return;
+    if (redp2p_fill_random(nonce, sizeof(nonce)) != 0 ||
+        !redp2p_hex_encode(nonce, sizeof(nonce), nonce_hex,
+            sizeof(nonce_hex)))
+    {
+        crypto_wipe(nonce, sizeof(nonce));
+        crypto_wipe(nonce_hex, sizeof(nonce_hex));
+        redp2p_index_respond_error(fd, 500, "internal");
+        return;
+    }
+    reply = json_value_init_object();
+    if (!reply) {
+        crypto_wipe(nonce, sizeof(nonce));
+        crypto_wipe(nonce_hex, sizeof(nonce_hex));
+        redp2p_index_respond_error(fd, 500, "internal");
+        return;
+    }
+    out = json_value_get_object(reply);
+    json_object_set_boolean(out, "ok", 1);
+    json_object_set_string(out, "nonce", nonce_hex);
+    json_object_set_number(out, "bits", (double)ctx->pow_bits);
+    crypto_wipe(nonce, sizeof(nonce));
+    crypto_wipe(nonce_hex, sizeof(nonce_hex));
+    redp2p_index_respond(fd, 200, "OK", reply);
+}
+
+/**
+ * Handles one register request, verifying proof of work and upserting.
+ * @param ctx Locked index context.
+ * @param fd  Request socket.
+ * @param req Request JSON object.
+ * @return None.
+ */
+static void redp2p_index_handle_register(redp2p_t *ctx, redp2p_fd_t fd,
+    JSON_Object *req)
+{
+    char id[REDP2P_ID_MAX + 1];
+    char nonce[17];
+    char solution[17];
+    char proof[65];
+    redp2p_candidate_t candidates[REDP2P_PEER_CANDIDATES_MAX];
+    const char *pass;
+    double proto;
+    double udp_port;
+    int n_candidates;
+    int add_result;
+
+    memset(nonce, 0, sizeof(nonce));
+    memset(solution, 0, sizeof(solution));
+    memset(proof, 0, sizeof(proof));
+    if (!redp2p_index_require_id_response(req, fd, id, sizeof(id))) {
+        crypto_wipe(nonce, sizeof(nonce));
+        crypto_wipe(solution, sizeof(solution));
+        crypto_wipe(proof, sizeof(proof));
+        return;
+    }
+    if (!redp2p_index_require_hex(req, "nonce", nonce, sizeof(nonce), 16) ||
+        !redp2p_index_require_hex(req, "solution", solution, sizeof(solution),
+            8) ||
+        !redp2p_index_require_hex(req, "proof", proof, sizeof(proof), 64))
+    {
+        crypto_wipe(nonce, sizeof(nonce));
+        crypto_wipe(solution, sizeof(solution));
+        crypto_wipe(proof, sizeof(proof));
+        redp2p_index_respond_error(fd, 400, "bad_request");
+        return;
+    }
+    if (json_object_has_value(req, "pass") &&
+        !json_object_has_value_of_type(req, "pass", JSONString))
+    {
+        crypto_wipe(nonce, sizeof(nonce));
+        crypto_wipe(solution, sizeof(solution));
+        crypto_wipe(proof, sizeof(proof));
+        redp2p_index_respond_error(fd, 400, "bad_request");
+        return;
+    }
+    if (!json_object_has_value_of_type(req, "proto", JSONNumber) ||
+        !json_object_has_value_of_type(req, "udp_port", JSONNumber))
+    {
+        crypto_wipe(nonce, sizeof(nonce));
+        crypto_wipe(solution, sizeof(solution));
+        crypto_wipe(proof, sizeof(proof));
+        redp2p_index_respond_error(fd, 400, "bad_request");
+        return;
+    }
+    proto = json_object_get_number(req, "proto");
+    udp_port = json_object_get_number(req, "udp_port");
+    if ((proto != REDP2P_PROTO_TCP && proto != REDP2P_PROTO_UDP) ||
+        udp_port < 1.0 || udp_port > 65535.0 ||
+        !redp2p_index_parse_candidates(req, "candidates", candidates,
+            &n_candidates))
+    {
+        crypto_wipe(nonce, sizeof(nonce));
+        crypto_wipe(solution, sizeof(solution));
+        crypto_wipe(proof, sizeof(proof));
+        redp2p_index_respond_error(fd, 400, "bad_request");
+        return;
+    }
+    pass = redp2p_get_register_pass(ctx, id);
+    if (!redp2p_verify_register_pow(pass, nonce, id, solution, proof,
+        ctx->pow_bits))
+    {
+        crypto_wipe(nonce, sizeof(nonce));
+        crypto_wipe(solution, sizeof(solution));
+        crypto_wipe(proof, sizeof(proof));
+        redp2p_index_respond_error(fd, 403, "auth_failed");
+        return;
+    }
+    redp2p_evict_stale(ctx);
+    add_result = redp2p_add_peer(ctx, id);
+    if (add_result == REDP2P_OK) {
+        size_t peer_index;
+
+        peer_index = redp2p_find_peer(ctx, id);
+        if (peer_index != SIZE_MAX) {
+            JSON_Value *reply;
+            JSON_Object *out;
+
+            ctx->peers[peer_index].proto = (int)proto;
+            ctx->peers[peer_index].udp_port = (unsigned short)udp_port;
+            ctx->peers[peer_index].n_candidates = n_candidates;
+            if (n_candidates > 0) {
+                memcpy(ctx->peers[peer_index].candidates, candidates,
+                    (size_t)n_candidates * sizeof(candidates[0]));
+            }
+            ctx->peers[peer_index].last_seen = redp2p_now_s();
+            reply = json_value_init_object();
+            if (!reply) {
+                crypto_wipe(nonce, sizeof(nonce));
+                crypto_wipe(solution, sizeof(solution));
+                crypto_wipe(proof, sizeof(proof));
+                redp2p_index_respond_error(fd, 500, "internal");
+                return;
+            }
+            out = json_value_get_object(reply);
+            json_object_set_boolean(out, "ok", 1);
+            json_object_set_string(out, "key",
+                ctx->peers[peer_index].key);
+            crypto_wipe(nonce, sizeof(nonce));
+            crypto_wipe(solution, sizeof(solution));
+            crypto_wipe(proof, sizeof(proof));
+            redp2p_index_respond(fd, 200, "OK", reply);
+            return;
+        }
+        redp2p_remove_peer(ctx, id);
+        redp2p_index_respond_error(fd, 500, "internal");
+    } else if (add_result == REDP2P_EFULL) {
+        redp2p_index_respond_error(fd, 503, "table_full");
+    } else {
+        redp2p_index_respond_error(fd, 500, "internal");
+    }
+    crypto_wipe(nonce, sizeof(nonce));
+    crypto_wipe(solution, sizeof(solution));
+    crypto_wipe(proof, sizeof(proof));
+}
+
+/**
+ * Handles one heartbeat request, authenticating with the key only.
+ * @param ctx Locked index context.
+ * @param fd  Request socket.
+ * @param req Request JSON object.
+ * @return None.
+ */
+static void redp2p_index_handle_heartbeat(redp2p_t *ctx, redp2p_fd_t fd,
+    JSON_Object *req)
+{
+    char id[REDP2P_ID_MAX + 1];
+    char key[REDP2P_KEY_STR_SZ];
+    redp2p_candidate_t candidates[REDP2P_PEER_CANDIDATES_MAX];
+    double proto;
+    double udp_port;
+    int n_candidates;
+    size_t peer_index;
+
+    memset(key, 0, sizeof(key));
+    if (!redp2p_index_require_id_response(req, fd, id, sizeof(id))) {
+        crypto_wipe(key, sizeof(key));
+        return;
+    }
+    if (!redp2p_index_require_hex(req, "key", key, sizeof(key),
+        REDP2P_KEY_SZ) ||
+        !json_object_has_value_of_type(req, "proto", JSONNumber) ||
+        !json_object_has_value_of_type(req, "udp_port", JSONNumber))
+    {
+        crypto_wipe(key, sizeof(key));
+        redp2p_index_respond_error(fd, 400, "bad_request");
+        return;
+    }
+    proto = json_object_get_number(req, "proto");
+    udp_port = json_object_get_number(req, "udp_port");
+    if ((proto != REDP2P_PROTO_TCP && proto != REDP2P_PROTO_UDP) ||
+        udp_port < 1.0 || udp_port > 65535.0 ||
+        !redp2p_index_parse_candidates(req, "candidates", candidates,
+            &n_candidates))
+    {
+        crypto_wipe(key, sizeof(key));
+        redp2p_index_respond_error(fd, 400, "bad_request");
+        return;
+    }
+    redp2p_evict_stale(ctx);
+    peer_index = redp2p_find_peer(ctx, id);
+    if (peer_index == SIZE_MAX) {
+        crypto_wipe(key, sizeof(key));
+        redp2p_index_respond_error(fd, 404, "not_found");
+        return;
+    }
+    if (strcmp(ctx->peers[peer_index].key, key) != 0) {
+        crypto_wipe(key, sizeof(key));
+        redp2p_index_respond_error(fd, 403, "invalid_key");
+        return;
+    }
+    ctx->peers[peer_index].proto = (int)proto;
+    ctx->peers[peer_index].udp_port = (unsigned short)udp_port;
+    ctx->peers[peer_index].n_candidates = n_candidates;
+    if (n_candidates > 0) {
+        memcpy(ctx->peers[peer_index].candidates, candidates,
+            (size_t)n_candidates * sizeof(candidates[0]));
+    }
+    ctx->peers[peer_index].last_seen = redp2p_now_s();
+    crypto_wipe(key, sizeof(key));
+    {
+        JSON_Value *reply;
+        JSON_Object *out;
+
+        reply = json_value_init_object();
+        if (!reply) {
+            redp2p_index_respond_error(fd, 500, "internal");
+            return;
+        }
+        out = json_value_get_object(reply);
+        json_object_set_boolean(out, "ok", 1);
+        redp2p_index_respond(fd, 200, "OK", reply);
+    }
+}
+
+/**
+ * Handles one lookup request, filtering expired records without writing.
+ * @param ctx Locked index context.
+ * @param fd  Request socket.
+ * @param req Request JSON object.
+ * @return None.
+ */
+static void redp2p_index_handle_lookup(redp2p_t *ctx, redp2p_fd_t fd,
+    JSON_Object *req)
+{
+    char id[REDP2P_ID_MAX + 1];
+    size_t peer_index;
+
+    if (!redp2p_index_require_id_response(req, fd, id, sizeof(id))) return;
+    peer_index = redp2p_find_peer(ctx, id);
+    if (peer_index == SIZE_MAX || redp2p_peer_is_stale(ctx, peer_index)) {
+        redp2p_index_respond_error(fd, 404, "not_found");
+        return;
+    }
+    {
+        JSON_Value *reply;
+        JSON_Object *out;
+
+        reply = json_value_init_object();
+        if (!reply) {
+            redp2p_index_respond_error(fd, 500, "internal");
+            return;
+        }
+        out = json_value_get_object(reply);
+        json_object_set_boolean(out, "ok", 1);
+        json_object_set_string(out, "id", ctx->peers[peer_index].id);
+        json_object_set_number(out, "proto",
+            (double)ctx->peers[peer_index].proto);
+        json_object_set_number(out, "udp_port",
+            (double)ctx->peers[peer_index].udp_port);
+        redp2p_index_append_candidates(out, "candidates",
+            ctx->peers[peer_index].candidates,
+            ctx->peers[peer_index].n_candidates);
+        json_object_set_number(out, "last_seen",
+            (double)ctx->peers[peer_index].last_seen);
+        redp2p_index_respond(fd, 200, "OK", reply);
+    }
+}
+
+/**
+ * Handles one list request, returning non-expired publisher identifiers.
+ * @param ctx Locked index context.
+ * @param fd  Request socket.
+ * @param req Request JSON object.
+ * @return None.
+ */
+static void redp2p_index_handle_list(redp2p_t *ctx, redp2p_fd_t fd,
+    JSON_Object *req)
+{
+    JSON_Value *reply;
+    JSON_Object *out;
+    JSON_Value *array_value;
+    JSON_Array *array;
+    size_t i;
+
+    (void)req;
+    reply = json_value_init_object();
+    if (!reply) {
+        redp2p_index_respond_error(fd, 500, "internal");
+        return;
+    }
+    out = json_value_get_object(reply);
+    array_value = json_value_init_array();
+    array = json_value_get_array(array_value);
+    for (i = 0; i < ctx->n_peers; i++) {
+        if (!redp2p_peer_is_stale(ctx, i))
+            json_array_append_string(array, ctx->peers[i].id);
+    }
+    json_object_set_value(out, "ids", array_value);
+    json_object_set_boolean(out, "ok", 1);
+    redp2p_index_respond(fd, 200, "OK", reply);
+}
+
+/**
+ * Handles one deregister request, requiring the stored registration key.
+ * @param ctx Locked index context.
+ * @param fd  Request socket.
+ * @param req Request JSON object.
+ * @return None.
+ */
+static void redp2p_index_handle_deregister(redp2p_t *ctx, redp2p_fd_t fd,
+    JSON_Object *req)
+{
+    char id[REDP2P_ID_MAX + 1];
+    char key[REDP2P_KEY_STR_SZ];
+    size_t peer_index;
+
+    memset(key, 0, sizeof(key));
+    if (!redp2p_index_require_id_response(req, fd, id, sizeof(id))) {
+        crypto_wipe(key, sizeof(key));
+        return;
+    }
+    if (!redp2p_index_require_hex(req, "key", key, sizeof(key),
+        REDP2P_KEY_SZ))
+    {
+        crypto_wipe(key, sizeof(key));
+        redp2p_index_respond_error(fd, 400, "bad_request");
+        return;
+    }
+    redp2p_evict_stale(ctx);
+    peer_index = redp2p_find_peer(ctx, id);
+    if (peer_index == SIZE_MAX ||
+        strcmp(ctx->peers[peer_index].key, key) != 0)
+    {
+        crypto_wipe(key, sizeof(key));
+        redp2p_index_respond_error(fd, 403, "invalid_key");
+        return;
+    }
+    redp2p_remove_peer(ctx, id);
+    crypto_wipe(key, sizeof(key));
+    {
+        JSON_Value *reply;
+        JSON_Object *out;
+
+        reply = json_value_init_object();
+        if (!reply) {
+            redp2p_index_respond_error(fd, 500, "internal");
+            return;
+        }
+        out = json_value_get_object(reply);
+        json_object_set_boolean(out, "ok", 1);
+        redp2p_index_respond(fd, 200, "OK", reply);
+    }
+}
+
+/**
+ * Handles one prune request, physically removing expired records.
+ * @param ctx Locked index context.
+ * @param fd  Request socket.
+ * @param req Request JSON object.
+ * @return None.
+ */
+static void redp2p_index_handle_prune(redp2p_t *ctx, redp2p_fd_t fd,
+    JSON_Object *req)
+{
+    size_t before;
+    size_t pruned;
+    JSON_Value *reply;
+    JSON_Object *out;
+
+    (void)req;
+    before = ctx->n_peers;
+    redp2p_evict_stale(ctx);
+    pruned = before - ctx->n_peers;
+    reply = json_value_init_object();
+    if (!reply) {
+        redp2p_index_respond_error(fd, 500, "internal");
+        return;
+    }
+    out = json_value_get_object(reply);
+    json_object_set_boolean(out, "ok", 1);
+    json_object_set_number(out, "pruned", (double)pruned);
+    redp2p_index_respond(fd, 200, "OK", reply);
+}
+
+/**
+ * Handles one punch_req request, storing a bounded pending call.
+ * @param ctx Locked index context.
+ * @param fd  Request socket.
+ * @param req Request JSON object.
+ * @return None.
+ */
+static void redp2p_index_handle_punch_req(redp2p_t *ctx, redp2p_fd_t fd,
+    JSON_Object *req)
+{
+    char self_id[REDP2P_ID_MAX + 1];
+    char target_id[REDP2P_ID_MAX + 1];
+    char session[REDP2P_CTRL_SESSION_MAX + 1];
+    redp2p_candidate_t candidates[REDP2P_PEER_CANDIDATES_MAX];
+    const char *session_str;
+    int n_candidates;
+
+    int self_result;
+    int target_result;
+
+    self_result = redp2p_index_require_id(req, "self_id", self_id,
+        sizeof(self_id));
+    target_result = redp2p_index_require_id(req, "target_id", target_id,
+        sizeof(target_id));
+    if (self_result == 0 || target_result == 0) {
+        redp2p_index_respond_error(fd, 400, "bad_request");
+        return;
+    }
+    if (self_result < 0 || target_result < 0) {
+        redp2p_index_respond_error(fd, 400, "invalid_id");
+        return;
+    }
+    if (!json_object_has_value_of_type(req, "session", JSONString)) {
+        redp2p_index_respond_error(fd, 400, "bad_request");
+        return;
+    }
+    session_str = json_object_get_string(req, "session");
+    if (!session_str || strlen(session_str) >= sizeof(session) ||
+        !redp2p_is_session_token(session_str) ||
+        !redp2p_index_parse_candidates(req, "candidates", candidates,
+            &n_candidates))
+    {
+        redp2p_index_respond_error(fd, 400, "bad_request");
+        return;
+    }
+    memcpy(session, session_str, strlen(session_str) + 1);
+    redp2p_pending_call_evict_stale(ctx);
+    if (!redp2p_pending_call_add(ctx, self_id, target_id, session, candidates,
+        n_candidates))
+    {
+        redp2p_index_respond_error(fd, 503, "busy");
+        return;
+    }
+    {
+        JSON_Value *reply;
+        JSON_Object *out;
+
+        reply = json_value_init_object();
+        if (!reply) {
+            redp2p_index_respond_error(fd, 500, "internal");
+            return;
+        }
+        out = json_value_get_object(reply);
+        json_object_set_boolean(out, "ok", 1);
+        redp2p_index_respond(fd, 200, "OK", reply);
+    }
+}
+
+/**
+ * Handles one punch_poll request, returning and consuming pending calls.
+ * @param ctx Locked index context.
+ * @param fd  Request socket.
+ * @param req Request JSON object.
+ * @return None.
+ */
+static void redp2p_index_handle_punch_poll(redp2p_t *ctx, redp2p_fd_t fd,
+    JSON_Object *req)
+{
+    char id[REDP2P_ID_MAX + 1];
+    redp2p_pending_call_t calls[REDP2P_MAX_PENDING_CALLS];
+    JSON_Value *reply;
+    JSON_Object *out;
+    JSON_Value *array_value;
+    JSON_Array *array;
+    int n_calls;
+    int i;
+
+    if (!redp2p_index_require_id_response(req, fd, id, sizeof(id))) return;
+    redp2p_pending_call_evict_stale(ctx);
+    redp2p_pending_call_take_all(ctx, id, calls, &n_calls);
+    reply = json_value_init_object();
+    if (!reply) {
+        redp2p_index_respond_error(fd, 500, "internal");
+        return;
+    }
+    out = json_value_get_object(reply);
+    array_value = json_value_init_array();
+    array = json_value_get_array(array_value);
+    for (i = 0; i < n_calls; i++) {
+        JSON_Value *call_value;
+        JSON_Object *call;
+
+        call_value = json_value_init_object();
+        call = json_value_get_object(call_value);
+        json_object_set_string(call, "self_id", calls[i].caller_id);
+        json_object_set_string(call, "session", calls[i].sess_id);
+        redp2p_index_append_candidates(call, "candidates",
+            calls[i].candidates, calls[i].n_candidates);
+        json_array_append_value(array, call_value);
+    }
+    json_object_set_value(out, "calls", array_value);
+    json_object_set_boolean(out, "ok", 1);
+    redp2p_index_respond(fd, 200, "OK", reply);
+}
+
+/**
+ * Dispatches one complete HTTP request to its JSON index operation handler.
+ * @param ctx  Locked index context.
+ * @param fd   Request socket.
+ * @param path Request path, ignored by the single-endpoint dispatch.
+ * @param body Request body.
+ * @return None.
+ */
+static void redp2p_index_dispatch(redp2p_t *ctx, redp2p_fd_t fd,
+    const char *path, const char *body)
+{
+    JSON_Value *value;
+    JSON_Object *req;
+    const char *op;
+
+    (void)path;
+    value = json_parse_string(body);
+    if (!value) {
+        redp2p_index_respond_error(fd, 400, "bad_request");
+        return;
+    }
+    if (json_value_get_type(value) != JSONObject) {
+        json_value_free(value);
+        redp2p_index_respond_error(fd, 400, "bad_request");
+        return;
+    }
+    req = json_value_get_object(value);
+    if (!redp2p_index_json_unique_fields(req)) {
+        json_value_free(value);
+        redp2p_index_respond_error(fd, 400, "bad_request");
+        return;
+    }
+    if (!json_object_has_value_of_type(req, "op", JSONString)) {
+        json_value_free(value);
+        redp2p_index_respond_error(fd, 400, "bad_request");
+        return;
+    }
+    op = json_object_get_string(req, "op");
+    if (strcmp(op, "challenge") == 0)
+        redp2p_index_handle_challenge(ctx, fd, req);
+    else if (strcmp(op, "register") == 0)
+        redp2p_index_handle_register(ctx, fd, req);
+    else if (strcmp(op, "heartbeat") == 0)
+        redp2p_index_handle_heartbeat(ctx, fd, req);
+    else if (strcmp(op, "lookup") == 0)
+        redp2p_index_handle_lookup(ctx, fd, req);
+    else if (strcmp(op, "list") == 0)
+        redp2p_index_handle_list(ctx, fd, req);
+    else if (strcmp(op, "deregister") == 0)
+        redp2p_index_handle_deregister(ctx, fd, req);
+    else if (strcmp(op, "prune") == 0)
+        redp2p_index_handle_prune(ctx, fd, req);
+    else if (strcmp(op, "punch_req") == 0)
+        redp2p_index_handle_punch_req(ctx, fd, req);
+    else if (strcmp(op, "punch_poll") == 0)
+        redp2p_index_handle_punch_poll(ctx, fd, req);
+    else
+        redp2p_index_respond_error(fd, 400, "bad_request");
+    json_value_free(value);
+}
+
+/**
+ * Scans one buffered HTTP request and reports whether it is complete.
+ * @param ctx           Locked index context.
+ * @param conn          In-flight request connection.
+ * @param method        Output HTTP method.
+ * @param method_cap    Method buffer capacity.
+ * @param path          Output request path.
+ * @param path_cap      Path buffer capacity.
+ * @param body          Output request body, nul-terminated.
+ * @param body_cap      Body buffer capacity.
+ * @param http_status_out Optional HTTP status to reply on failure; 0 when the
+ *                        request is complete, 1 when more input is needed.
+ * @return 1 when the request is complete, 0 when more input is needed or on
+ * a protocol violation (http_status_out set to a reply status).
+ */
+static int redp2p_index_request_parse(redp2p_index_conn_t *conn,
+    char *method, int method_cap, char *path, int path_cap, char *body,
+    int body_cap, int *http_status_out)
+{
+    char *header_end;
+    char *line;
+    const char *cursor;
+    long content_length;
+    int has_transfer_encoding;
+
+    if (http_status_out) *http_status_out = 0;
+    if (conn->buf_len <= 0) return 0;
+    if (conn->buf_len >= (int)sizeof(conn->buf) - 1) {
+        if (http_status_out) *http_status_out = 431;
+        return 1;
+    }
+    conn->buf[conn->buf_len] = '\0';
+    header_end = strstr(conn->buf, "\r\n\r\n");
+    if (!header_end) {
+        if (conn->buf_len >= REDP2P_HTTP_LINE_MAX * REDP2P_HTTP_HEADERS_MAX) {
+            if (http_status_out) *http_status_out = 431;
+            return 1;
+        }
+        return 0;
+    }
+    line = conn->buf;
+    cursor = line;
+    if (!redp2p_parse_field(&cursor, method, (size_t)method_cap, ' '))
+        goto malformed;
+    if (strcmp(method, "POST") != 0) {
+        if (http_status_out) *http_status_out = 405;
+        return 1;
+    }
+    if (!redp2p_parse_field(&cursor, path, (size_t)path_cap, ' '))
+        goto malformed;
+    if (strncmp(cursor, "HTTP/1.1", 8) != 0 &&
+        strncmp(cursor, "HTTP/1.0", 8) != 0)
+        goto malformed;
+    content_length = -1;
+    has_transfer_encoding = 0;
+    cursor = strstr(line, "\r\n");
+    if (!cursor) goto malformed;
+    cursor += 2;
+    while (cursor < header_end) {
+        char *nl;
+        char hline[REDP2P_HTTP_LINE_MAX];
+        char *colon;
+        size_t len;
+
+        nl = strchr(cursor, '\n');
+        if (!nl) break;
+        len = (size_t)(nl - cursor);
+        if (len == 1 && cursor[0] == '\r') break;
+        if (len >= sizeof(hline)) goto malformed;
+        memcpy(hline, cursor, len);
+        hline[len] = '\0';
+        if (len > 0 && hline[len - 1] == '\r') hline[len - 1] = '\0';
+        colon = strchr(hline, ':');
+        if (colon) {
+            const char *value;
+            char name[32];
+
+            if ((size_t)(colon - hline) >= sizeof(name)) goto malformed;
+            memcpy(name, hline, (size_t)(colon - hline));
+            name[colon - hline] = '\0';
+            value = colon + 1;
+            while (*value == ' ' || *value == '\t') value++;
+            if (redp2p_ascii_casecmp(name, "Content-Length") == 0) {
+                if (!redp2p_parse_u(value, 0, body_cap - 1, &content_length))
+                    goto malformed;
+            } else if (redp2p_ascii_casecmp(name, "Transfer-Encoding") == 0) {
+                has_transfer_encoding = 1;
+            }
+        }
+        cursor = nl + 1;
+    }
+    if (has_transfer_encoding) {
+        if (http_status_out) *http_status_out = 501;
+        return 1;
+    }
+    if (content_length < 0) content_length = 0;
+    if (content_length > body_cap - 1) {
+        if (http_status_out) *http_status_out = 413;
+        return 1;
+    }
+    if (conn->buf_len < (int)(header_end - conn->buf) + 4 + (int)content_length)
+        return 0;
+    if (content_length > 0) {
+        memcpy(body, header_end + 4, (size_t)content_length);
+    }
+    body[content_length] = '\0';
+    if (http_status_out) *http_status_out = 0;
+    return 1;
+malformed:
+    if (http_status_out) *http_status_out = 400;
+    return 1;
+}
 
 /**
  * Opens the index listener and records its owned runtime resources.
@@ -4461,10 +5075,10 @@ typedef enum {
  * @return REDP2P_OK on success, or a negative error code on failure.
  */
 static int redp2p_index_runtime_initialize(
-redp2p_index_runtime_t *runtime,
-redp2p_t *ctx,
-const char *host,
-unsigned short port)
+    redp2p_index_runtime_t *runtime,
+    redp2p_t *ctx,
+    const char *host,
+    unsigned short port)
 {
     struct addrinfo hints;
     struct addrinfo *addresses;
@@ -4535,677 +5149,7 @@ unsigned short port)
 }
 
 /**
- * Removes one disconnected connection and its associated index state.
- * @param ctx Locked index context.
- * @param connection_index Connection index to remove.
- * @return None.
- */
-static void redp2p_index_disconnect(redp2p_t *ctx, int connection_index) {
-    redp2p_tcp_conn_t *connection;
-    struct sockaddr_storage peer_address;
-    socklen_t peer_address_length;
-    int challenge_index;
-
-    connection = &ctx->conns[connection_index];
-    memset(&peer_address, 0, sizeof(peer_address));
-    peer_address_length = sizeof(peer_address);
-    if (getpeername(connection->fd, (struct sockaddr *)&peer_address,
-        &peer_address_length) == 0)
-    {
-        challenge_index = redp2p_find_pow_challenge(ctx, &peer_address);
-    } else {
-        challenge_index = -1;
-    }
-    if (challenge_index >= 0)
-        redp2p_remove_pow_challenge(ctx, challenge_index);
-    if (connection->registered) {
-        redp2p_remove_peer(ctx, connection->id);
-        fprintf(stderr, "redp2p: peer '%s' disconnected\n", connection->id);
-    }
-    redp2p_conn_remove(ctx, connection_index);
-}
-
-/**
- * Evicts expired registration challenges at the event-loop cadence.
- * @param ctx Locked index context.
- * @return None.
- */
-static void redp2p_index_cleanup_stale_challenges(redp2p_t *ctx) {
-    redp2p_evict_pow_challenges(ctx, redp2p_now_s());
-}
-
-/**
- * Evicts expired publishers immediately before list enumeration.
- * @param ctx Locked index context.
- * @return None.
- */
-static void redp2p_index_cleanup_stale_peers(redp2p_t *ctx) {
-    redp2p_evict_stale(ctx);
-}
-
-/**
- * Evicts expired pending punches immediately before pending insertion.
- * @param ctx Locked index context.
- * @return None.
- */
-static void redp2p_index_cleanup_stale_punches(redp2p_t *ctx) {
-    redp2p_pending_punch_evict_stale(ctx);
-}
-
-/**
- * Handles protocol version negotiation for one complete control line.
- * @param connection Connection receiving the HELLO command.
- * @param command_line Complete control line.
- * @return KEEP after a valid HELLO, REMOVE on a version violation, or
- * INCOMPLETE when the line is not a HELLO command.
- */
-static redp2p_index_action_t redp2p_index_handle_hello(
-redp2p_tcp_conn_t *connection,
-const char *command_line)
-{
-    if (strcmp(command_line, REDP2P_CTRTOK_HELLO) == 0) {
-        if (connection->hello_ok) {
-            redp2p_tcp_send(connection->fd,
-                REDP2P_CTRTOK_ERROR_VERSION_MISMATCH);
-            return REDP2P_INDEX_ACTION_REMOVE;
-        }
-        connection->hello_ok = 1;
-        redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_HELLO_OK);
-        return REDP2P_INDEX_ACTION_KEEP;
-    }
-    if (strncmp(command_line, REDP2P_CTRTOK_HELLO,
-        strlen(REDP2P_CTRTOK_HELLO) - strlen("REDP2P/1")) == 0 ||
-        !connection->hello_ok)
-    {
-        redp2p_tcp_send(connection->fd,
-            REDP2P_CTRTOK_ERROR_VERSION_MISMATCH);
-        return REDP2P_INDEX_ACTION_REMOVE;
-    }
-    return REDP2P_INDEX_ACTION_INCOMPLETE;
-}
-
-/**
- * Completes a REGISTER proof exchange and claims registration ownership.
- * @param ctx Locked index context.
- * @param connection Registering connection.
- * @param command_line Complete REGISTER proof command.
- * @param peer_address Remote connection address.
- * @return KEEP without removing the connection.
- */
-static redp2p_index_action_t redp2p_index_handle_register_proof(
-redp2p_t *ctx,
-redp2p_tcp_conn_t *connection,
-const char *command_line,
-const struct sockaddr_storage *peer_address)
-{
-    char id[REDP2P_ID_MAX + 1];
-    char solution[17];
-    char proof[65];
-    char reply[REDP2P_BUF];
-    const char *register_pass;
-    int challenge_index;
-
-    memset(solution, 0, sizeof(solution));
-    memset(proof, 0, sizeof(proof));
-    if (redp2p_parse_register_solution(command_line, id, solution, proof)) {
-        uint64_t now;
-
-        now = redp2p_now_s();
-        register_pass = redp2p_get_register_pass(ctx, id);
-        challenge_index = redp2p_find_pow_challenge(ctx, peer_address);
-        if (challenge_index < 0 ||
-            (ctx->pow_challenges[challenge_index].expires_at != 0 &&
-            now >= ctx->pow_challenges[challenge_index].expires_at) ||
-            strcmp(ctx->pow_challenges[challenge_index].id, id) != 0 ||
-            !redp2p_verify_register_pow(register_pass,
-                ctx->pow_challenges[challenge_index].nonce_hex, id,
-                solution, proof, ctx->pow_bits))
-        {
-            if (challenge_index >= 0)
-                redp2p_remove_pow_challenge(ctx, challenge_index);
-            redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_AUTH_FAILED);
-            crypto_wipe(solution, sizeof(solution));
-            crypto_wipe(proof, sizeof(proof));
-            return REDP2P_INDEX_ACTION_KEEP;
-        }
-        redp2p_remove_pow_challenge(ctx, challenge_index);
-        if (redp2p_add_peer(ctx, id) == REDP2P_OK &&
-            redp2p_format_register_ok(ctx, id, reply, sizeof(reply)))
-        {
-            redp2p_tcp_send(connection->fd, reply);
-            redp2p_conn_claim_registration(ctx, connection, id);
-        } else {
-            redp2p_tcp_send(connection->fd,
-                REDP2P_CTRTOK_ERROR_PEER_TABLE_FULL);
-        }
-    } else {
-        challenge_index = redp2p_find_pow_challenge(ctx, peer_address);
-        if (challenge_index >= 0)
-            redp2p_remove_pow_challenge(ctx, challenge_index);
-        redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_AUTH_FAILED);
-    }
-    crypto_wipe(solution, sizeof(solution));
-    crypto_wipe(proof, sizeof(proof));
-    return REDP2P_INDEX_ACTION_KEEP;
-}
-
-/**
- * Refreshes an owned registration and returns its existing key.
- * @param ctx Locked index context.
- * @param connection Connection owning the registration.
- * @param id Registration identifier.
- * @return KEEP without removing the connection.
- */
-static redp2p_index_action_t redp2p_index_handle_register_refresh(
-redp2p_t *ctx,
-redp2p_tcp_conn_t *connection,
-const char *id)
-{
-    char reply[REDP2P_BUF];
-
-    if (redp2p_refresh_peer(ctx, id) == REDP2P_OK &&
-        redp2p_format_register_ok(ctx, id, reply, sizeof(reply)))
-    {
-        redp2p_tcp_send(connection->fd, reply);
-    } else {
-        redp2p_tcp_send(connection->fd,
-            REDP2P_CTRTOK_ERROR_NOT_REGISTERED);
-    }
-    return REDP2P_INDEX_ACTION_KEEP;
-}
-
-/**
- * Issues and stores a new registration challenge for one remote address.
- * @param ctx Locked index context.
- * @param connection Connection requesting registration.
- * @param peer_address Remote connection address.
- * @param id Requested registration identifier.
- * @return KEEP without removing the connection.
- */
-static redp2p_index_action_t redp2p_index_handle_register_challenge(
-redp2p_t *ctx,
-redp2p_tcp_conn_t *connection,
-const struct sockaddr_storage *peer_address,
-const char *id)
-{
-    unsigned char nonce[8];
-    char nonce_hex[17];
-    char reply[REDP2P_BUF];
-
-    if (ctx->n_pow_challenges >= REDP2P_POW_CHALLENGES_MAX &&
-        redp2p_find_pow_challenge(ctx, peer_address) < 0)
-    {
-        redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_ERROR_BUSY);
-        return REDP2P_INDEX_ACTION_KEEP;
-    }
-    memset(nonce, 0, sizeof(nonce));
-    memset(nonce_hex, 0, sizeof(nonce_hex));
-    if (redp2p_fill_random(nonce, sizeof(nonce)) != 0 ||
-        !redp2p_hex_encode(nonce, sizeof(nonce), nonce_hex,
-            sizeof(nonce_hex)))
-    {
-        redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_ERROR_RANDOM);
-        crypto_wipe(nonce, sizeof(nonce));
-        crypto_wipe(nonce_hex, sizeof(nonce_hex));
-        return REDP2P_INDEX_ACTION_KEEP;
-    }
-    snprintf(reply, sizeof(reply), "%s%s:%d", REDP2P_CTRTOK_CHALLENGE,
-        nonce_hex, ctx->pow_bits);
-    if (!redp2p_store_pow_challenge(ctx, peer_address, id,
-        reply + strlen(REDP2P_CTRTOK_CHALLENGE)))
-    {
-        redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_ERROR_BUSY);
-    } else {
-        redp2p_tcp_send(connection->fd, reply);
-    }
-    crypto_wipe(nonce, sizeof(nonce));
-    crypto_wipe(nonce_hex, sizeof(nonce_hex));
-    return REDP2P_INDEX_ACTION_KEEP;
-}
-
-/**
- * Handles registration challenge, refresh, and proof command forms.
- * @param ctx Locked index context.
- * @param connection Registering connection.
- * @param command_line Complete REGISTER command.
- * @return KEEP without removing the connection.
- */
-static redp2p_index_action_t redp2p_index_handle_register(
-redp2p_t *ctx,
-redp2p_tcp_conn_t *connection,
-const char *command_line)
-{
-    struct sockaddr_storage peer_address;
-    socklen_t peer_address_length;
-    char id[REDP2P_ID_MAX + 1];
-    int has_solution;
-
-    peer_address_length = sizeof(peer_address);
-    if (getpeername(connection->fd, (struct sockaddr *)&peer_address,
-        &peer_address_length) != 0)
-        memset(&peer_address, 0, sizeof(peer_address));
-    has_solution = strstr(command_line,
-        ":" REDP2P_CTRTOK_SOLUTION) != NULL;
-    if (!has_solution && !redp2p_parse_register_id(command_line, id)) {
-        redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_ERROR_INVALID_ID);
-        return REDP2P_INDEX_ACTION_KEEP;
-    }
-    if (connection->registered && strcmp(connection->id, id) != 0) {
-        redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_ERROR_MALFORMED);
-        return REDP2P_INDEX_ACTION_KEEP;
-    }
-    if (has_solution)
-        return redp2p_index_handle_register_proof(ctx, connection,
-            command_line, &peer_address);
-    if (connection->registered && strcmp(connection->id, id) == 0)
-        return redp2p_index_handle_register_refresh(ctx, connection, id);
-    return redp2p_index_handle_register_challenge(ctx, connection,
-        &peer_address, id);
-}
-
-/**
- * Handles one complete PUNCH_REQ2 candidate block.
- * @param ctx Locked index context.
- * @param connection Requesting consumer connection.
- * @param command_line Complete PUNCH_REQ2 command line.
- * @param block_start First candidate block byte.
- * @param block_limit One byte past buffered input.
- * @param consumed_end Output cursor after the complete block.
- * @return KEEP after consuming a block or INCOMPLETE until END arrives.
- */
-static redp2p_index_action_t redp2p_index_handle_punch_req2(
-redp2p_t *ctx,
-redp2p_tcp_conn_t *connection,
-const char *command_line,
-char *block_start,
-char *block_limit,
-char **consumed_end)
-{
-    char self_id[REDP2P_ID_MAX + 1] = {0};
-    char target_id[REDP2P_ID_MAX + 1] = {0};
-    char session_id[REDP2P_CTRL_SESSION_MAX + 1] = {0};
-    char candidate_block[REDP2P_BUF] = "";
-    char message[REDP2P_BUF];
-    char *block_end;
-    int target_fd;
-    size_t peer_index;
-    int pending_index;
-    int i;
-
-    if (!redp2p_find_end_line(block_start, block_limit, &block_end))
-        return REDP2P_INDEX_ACTION_INCOMPLETE;
-    *consumed_end = block_end;
-    if (!redp2p_parse_punch_req2(command_line, self_id, target_id,
-        session_id) ||
-        !redp2p_copy_candidate_block(block_start, block_end, candidate_block,
-            sizeof(candidate_block)))
-    {
-        redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_ERROR_MALFORMED);
-        return REDP2P_INDEX_ACTION_KEEP;
-    }
-    target_fd = -1;
-    for (i = 0; i < ctx->n_conns; i++) {
-        if (ctx->conns[i].registered &&
-            strcmp(ctx->conns[i].id, target_id) == 0)
-        {
-            target_fd = ctx->conns[i].fd;
-            break;
-        }
-    }
-    peer_index = redp2p_find_peer(ctx, target_id);
-    if (target_fd == -1 || peer_index == SIZE_MAX) {
-        redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_ERROR_OFFLINE);
-        return REDP2P_INDEX_ACTION_KEEP;
-    }
-    snprintf(message, sizeof(message), "%s%s:%s\n",
-        REDP2P_CTRTOK_PUNCH_CALL2, self_id, session_id);
-    if (!redp2p_append_text(message, sizeof(message), candidate_block)) {
-        redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_ERROR_MALFORMED);
-        return REDP2P_INDEX_ACTION_KEEP;
-    }
-    redp2p_index_cleanup_stale_punches(ctx);
-    if (ctx->n_pending_punches >= REDP2P_MAX_PENDING_PUNCHES) {
-        redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_ERROR_BUSY);
-        return REDP2P_INDEX_ACTION_KEEP;
-    }
-    pending_index = ctx->n_pending_punches++;
-    snprintf(ctx->pending_punches[pending_index].self_id,
-        sizeof(ctx->pending_punches[pending_index].self_id), "%s", self_id);
-    snprintf(ctx->pending_punches[pending_index].target_id,
-        sizeof(ctx->pending_punches[pending_index].target_id), "%s",
-        target_id);
-    snprintf(ctx->pending_punches[pending_index].sess_id,
-        sizeof(ctx->pending_punches[pending_index].sess_id), "%s",
-        session_id);
-    ctx->pending_punches[pending_index].consumer_fd = connection->fd;
-    ctx->pending_punches[pending_index].ts = redp2p_now_s();
-    if (redp2p_tcp_send(target_fd, message) != REDP2P_OK) {
-        redp2p_pending_punch_remove(ctx, pending_index);
-        redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_ERROR_OFFLINE);
-    }
-    return REDP2P_INDEX_ACTION_KEEP;
-}
-
-/**
- * Handles one complete PUNCH_ACK2 candidate block.
- * @param ctx Locked index context.
- * @param connection Acknowledging publisher connection.
- * @param command_line Complete PUNCH_ACK2 command line.
- * @param block_start First candidate block byte.
- * @param block_limit One byte past buffered input.
- * @param consumed_end Output cursor after the complete block.
- * @return KEEP after consuming a block or INCOMPLETE until END arrives.
- */
-static redp2p_index_action_t redp2p_index_handle_punch_ack2(
-redp2p_t *ctx,
-redp2p_tcp_conn_t *connection,
-const char *command_line,
-char *block_start,
-char *block_limit,
-char **consumed_end)
-{
-    char self_id[REDP2P_ID_MAX + 1] = {0};
-    char target_id[REDP2P_ID_MAX + 1] = {0};
-    char session_id[REDP2P_CTRL_SESSION_MAX + 1] = {0};
-    char candidate_block[REDP2P_BUF] = "";
-    char response[REDP2P_BUF];
-    char *block_end;
-    int pending_index;
-
-    if (!redp2p_find_end_line(block_start, block_limit, &block_end))
-        return REDP2P_INDEX_ACTION_INCOMPLETE;
-    *consumed_end = block_end;
-    if (!redp2p_parse_punch_ack2(command_line, self_id, target_id,
-        session_id) || !connection->registered ||
-        strcmp(connection->id, self_id) != 0 ||
-        !redp2p_copy_candidate_block(block_start, block_end, candidate_block,
-            sizeof(candidate_block)))
-    {
-        redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_ERROR_MALFORMED);
-        return REDP2P_INDEX_ACTION_KEEP;
-    }
-    pending_index = redp2p_pending_punch_find(ctx, self_id, target_id,
-        session_id);
-    if (pending_index < 0) return REDP2P_INDEX_ACTION_KEEP;
-    snprintf(response, sizeof(response), "%s%s:%s\n",
-        REDP2P_CTRTOK_PUNCH_OK2, self_id, session_id);
-    if (!redp2p_append_text(response, sizeof(response), candidate_block)) {
-        redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_ERROR_MALFORMED);
-        return REDP2P_INDEX_ACTION_KEEP;
-    }
-    redp2p_tcp_send(ctx->pending_punches[pending_index].consumer_fd, response);
-    redp2p_pending_punch_remove(ctx, pending_index);
-    return REDP2P_INDEX_ACTION_KEEP;
-}
-
-/**
- * Removes a registration when its identifier and key match.
- * @param ctx Locked index context.
- * @param connection Connection requesting removal.
- * @param command_line Complete DEREGISTER command.
- * @return KEEP without removing the connection.
- */
-static redp2p_index_action_t redp2p_index_handle_deregister(
-redp2p_t *ctx,
-redp2p_tcp_conn_t *connection,
-const char *command_line)
-{
-    char id[REDP2P_ID_MAX + 1];
-    char key[REDP2P_KEY_STR_SZ];
-    size_t peer_index;
-
-    memset(key, 0, sizeof(key));
-    if (redp2p_parse_deregister(command_line, id, key)) {
-        peer_index = redp2p_find_peer(ctx, id);
-        if (peer_index != SIZE_MAX &&
-            strcmp(ctx->peers[peer_index].key, key) == 0)
-        {
-            redp2p_remove_peer(ctx, id);
-            redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_OK);
-        } else {
-            redp2p_tcp_send(connection->fd,
-                REDP2P_CTRTOK_ERROR_INVALID_KEY);
-        }
-    } else {
-        redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_ERROR_MALFORMED);
-    }
-    crypto_wipe(key, sizeof(key));
-    return REDP2P_INDEX_ACTION_KEEP;
-}
-
-/**
- * Sends the active publisher list in current peer-table order.
- * @param ctx Locked index context.
- * @param connection Connection requesting the list.
- * @param command_line Complete LIST command.
- * @return KEEP without removing the connection.
- */
-static redp2p_index_action_t redp2p_index_handle_list(
-redp2p_t *ctx,
-redp2p_tcp_conn_t *connection,
-const char *command_line)
-{
-    char reply[REDP2P_BUF];
-    size_t peer_index;
-
-    if (strcmp(command_line, REDP2P_CTRTOK_LIST_PUBLISHERS) != 0) {
-        redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_ERROR_MALFORMED);
-        return REDP2P_INDEX_ACTION_KEEP;
-    }
-    redp2p_index_cleanup_stale_peers(ctx);
-    for (peer_index = 0; peer_index < ctx->n_peers; peer_index++) {
-        snprintf(reply, sizeof(reply), "%s%s", REDP2P_CTRTOK_PUBLISHER,
-            ctx->peers[peer_index].id);
-        redp2p_tcp_send(connection->fd, reply);
-    }
-    redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_END);
-    return REDP2P_INDEX_ACTION_KEEP;
-}
-
-/**
- * Looks up one publisher and sends its current presence state.
- * @param ctx Locked index context.
- * @param connection Connection requesting the lookup.
- * @param command_line Complete LOOKUP command.
- * @return KEEP without removing the connection.
- */
-static redp2p_index_action_t redp2p_index_handle_lookup(
-redp2p_t *ctx,
-redp2p_tcp_conn_t *connection,
-const char *command_line)
-{
-    char id[REDP2P_ID_MAX + 1];
-    char reply[REDP2P_BUF];
-    size_t peer_index;
-
-    if (redp2p_parse_lookup(command_line, id)) {
-        peer_index = redp2p_find_peer(ctx, id);
-        if (peer_index != SIZE_MAX) {
-            snprintf(reply, sizeof(reply), "%s%s", REDP2P_CTRTOK_PUBLISHER,
-                ctx->peers[peer_index].id);
-            redp2p_tcp_send(connection->fd, reply);
-        } else {
-            redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_NOT_FOUND);
-        }
-    } else {
-        redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_ERROR_MALFORMED);
-    }
-    return REDP2P_INDEX_ACTION_KEEP;
-}
-
-/**
- * Dispatches one validated control line to its index command handler.
- * @param ctx Locked index context.
- * @param connection_index Current connection index.
- * @param command_line Complete validated command line.
- * @param block_start First byte after the command line.
- * @param block_limit One byte past buffered input.
- * @param consumed_end Output cursor after any consumed candidate block.
- * @return Explicit connection or buffering action.
- */
-static redp2p_index_action_t redp2p_index_dispatch_command(
-redp2p_t *ctx,
-int connection_index,
-const char *command_line,
-char *block_start,
-char *block_limit,
-char **consumed_end)
-{
-    redp2p_tcp_conn_t *connection;
-    redp2p_index_action_t action;
-    const char *colon;
-    char command[32];
-    size_t command_length;
-
-    connection = &ctx->conns[connection_index];
-    action = redp2p_index_handle_hello(connection, command_line);
-    if (action != REDP2P_INDEX_ACTION_INCOMPLETE) return action;
-    colon = strchr(command_line, ':');
-    command_length = colon ? (size_t)(colon - command_line) :
-        strlen(command_line);
-    if (command_length == 0 || command_length >= sizeof(command)) {
-        redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_ERROR_MALFORMED);
-        return REDP2P_INDEX_ACTION_KEEP;
-    }
-    memcpy(command, command_line, command_length);
-    command[command_length] = '\0';
-    if (strcmp(command, REDP2P_CTRCMD_REGISTER) == 0)
-        return redp2p_index_handle_register(ctx, connection, command_line);
-    if (strcmp(command, REDP2P_CTRCMD_PUNCH_REQ2) == 0)
-        return redp2p_index_handle_punch_req2(ctx, connection, command_line,
-            block_start, block_limit, consumed_end);
-    if (strcmp(command, REDP2P_CTRCMD_PUNCH_ACK2) == 0)
-        return redp2p_index_handle_punch_ack2(ctx, connection, command_line,
-            block_start, block_limit, consumed_end);
-    if (strcmp(command, REDP2P_CTRCMD_DEREGISTER) == 0)
-        return redp2p_index_handle_deregister(ctx, connection, command_line);
-    if (strcmp(command, REDP2P_CTRCMD_LIST_PUBLISHERS) == 0)
-        return redp2p_index_handle_list(ctx, connection, command_line);
-    if (strcmp(command, REDP2P_CTRCMD_LOOKUP) == 0)
-        return redp2p_index_handle_lookup(ctx, connection, command_line);
-    redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_ERROR_UNKNOWN_COMMAND);
-    return REDP2P_INDEX_ACTION_KEEP;
-}
-
-/**
- * Frames and consumes all complete commands buffered on one connection.
- * @param ctx Locked index context.
- * @param connection_index Current connection index.
- * @return KEEP while connected, REMOVE after connection removal, or
- * INCOMPLETE when an END-framed command remains buffered.
- */
-static redp2p_index_action_t redp2p_index_process_connection_buffer(
-redp2p_t *ctx,
-int connection_index)
-{
-    redp2p_tcp_conn_t *connection;
-    char *line_start;
-    char *newline;
-    int incomplete;
-
-    connection = &ctx->conns[connection_index];
-    line_start = connection->buf;
-    incomplete = 0;
-    while ((newline = (char *)memchr(line_start, '\n',
-        (size_t)(connection->buf + connection->buf_len - line_start))) != NULL)
-    {
-        redp2p_index_action_t action;
-        char command_line[REDP2P_BUF];
-        char *line_base;
-        char *consumed_end;
-        int line_length;
-
-        line_base = line_start;
-        line_length = (int)(newline - line_start);
-        if (line_length <= 0) {
-            line_start += line_length + 1;
-            continue;
-        }
-        if (line_length > REDP2P_CTRL_LINE_MAX ||
-            line_length > (int)sizeof(command_line) - 1)
-        {
-            redp2p_conn_remove(ctx, connection_index);
-            return REDP2P_INDEX_ACTION_REMOVE;
-        }
-        if (!redp2p_control_bytes_valid(line_start, (size_t)line_length)) {
-            redp2p_tcp_send(connection->fd, REDP2P_CTRTOK_ERROR_MALFORMED);
-            line_start += line_length + 1;
-            continue;
-        }
-        memcpy(command_line, line_start, (size_t)line_length);
-        command_line[line_length] = '\0';
-        line_start += line_length + 1;
-        consumed_end = line_start;
-        action = redp2p_index_dispatch_command(ctx, connection_index,
-            command_line, line_start, connection->buf + connection->buf_len,
-            &consumed_end);
-        if (action == REDP2P_INDEX_ACTION_REMOVE) {
-            redp2p_conn_remove(ctx, connection_index);
-            return action;
-        }
-        if (action == REDP2P_INDEX_ACTION_INCOMPLETE) {
-            line_start = line_base;
-            incomplete = 1;
-            break;
-        }
-        line_start = consumed_end;
-        if (line_start >= connection->buf + connection->buf_len) break;
-    }
-    if (line_start > connection->buf) {
-        int remaining;
-
-        remaining = (int)(connection->buf + connection->buf_len - line_start);
-        if (remaining > 0)
-            memmove(connection->buf, line_start, (size_t)remaining);
-        connection->buf_len = remaining;
-    }
-    return incomplete || line_start == connection->buf ?
-        REDP2P_INDEX_ACTION_INCOMPLETE :
-        REDP2P_INDEX_ACTION_KEEP;
-}
-
-/**
- * Reads available input and processes complete commands for one connection.
- * @param ctx Locked index context.
- * @param connection_index Current connection index.
- * @return Explicit connection or buffering action.
- */
-static redp2p_index_action_t redp2p_index_read_connection(
-redp2p_t *ctx,
-int connection_index)
-{
-    redp2p_tcp_conn_t *connection;
-    char input[REDP2P_BUF];
-    int input_length;
-
-    connection = &ctx->conns[connection_index];
-    input_length = redp2p_sock_read(connection->fd, input,
-        (int)sizeof(input) - 1);
-    if (input_length <= 0) {
-        redp2p_index_disconnect(ctx, connection_index);
-        return REDP2P_INDEX_ACTION_REMOVE;
-    }
-    input[input_length] = '\0';
-    if (connection->buf_len + input_length >
-        (int)sizeof(connection->buf) - 1)
-    {
-        redp2p_conn_remove(ctx, connection_index);
-        return REDP2P_INDEX_ACTION_REMOVE;
-    }
-    memcpy(connection->buf + connection->buf_len, input,
-        (size_t)input_length);
-    connection->buf_len += input_length;
-    if (connection->buf_len >= REDP2P_CTRL_LINE_MAX &&
-        !memchr(connection->buf, '\n', (size_t)connection->buf_len))
-    {
-        redp2p_conn_remove(ctx, connection_index);
-        return REDP2P_INDEX_ACTION_REMOVE;
-    }
-    return redp2p_index_process_connection_buffer(ctx, connection_index);
-}
-
-/**
- * Builds the next readable descriptor set and evicts expired challenges.
+ * Builds the next readable descriptor set and evicts expired state.
  * @param runtime Initialized index runtime.
  * @return REDP2P_OK when ready, or REDP2P_ENET on failure.
  */
@@ -5224,16 +5168,16 @@ static int redp2p_index_prepare_fdset(redp2p_index_runtime_t *runtime) {
         return REDP2P_ENET;
     }
     redp2p_lock(ctx);
+    redp2p_pending_call_evict_stale(ctx);
     for (i = ctx->n_conns - 1; i >= 0; i--) {
         if (!redp2p_fdset_add(ctx->conns[i].fd, &runtime->readable_fds,
             &runtime->max_fd))
         {
             redp2p_set_error(ctx,
                 "index: client descriptor cannot be represented by fd_set");
-            redp2p_conn_remove(ctx, i);
+            redp2p_index_conn_remove(ctx, i);
         }
     }
-    redp2p_index_cleanup_stale_challenges(ctx);
     redp2p_unlock(ctx);
     return REDP2P_OK;
 }
@@ -5255,7 +5199,7 @@ static void redp2p_index_accept_connection(redp2p_index_runtime_t *runtime) {
     if (REDP2P_ISERR(client_fd)) return;
     redp2p_set_nonblock(client_fd);
     redp2p_lock(runtime->ctx);
-    if (redp2p_conn_add(runtime->ctx, client_fd) != REDP2P_OK)
+    if (redp2p_index_conn_add(runtime->ctx, client_fd) != REDP2P_OK)
         REDP2P_FD_CLOSE(client_fd);
     redp2p_unlock(runtime->ctx);
 }
@@ -5270,12 +5214,57 @@ static void redp2p_index_process_connections(redp2p_index_runtime_t *runtime) {
     int i;
 
     ctx = runtime->ctx;
-    redp2p_lock(ctx);
     for (i = ctx->n_conns - 1; i >= 0; i--) {
+        char method[16];
+        char path[128];
+        char body[REDP2P_HTTP_BODY_MAX + 1];
+        int http_status;
+        int nread;
+
+        if (ctx->conns[i].buf_len > 0 &&
+            redp2p_now_ms() - ctx->conns[i].ts > REDP2P_HTTP_TIMEOUT_S * 1000u)
+        {
+            redp2p_lock(ctx);
+            redp2p_index_conn_remove(ctx, i);
+            redp2p_unlock(ctx);
+            continue;
+        }
         if (!FD_ISSET(ctx->conns[i].fd, &runtime->readable_fds)) continue;
-        (void)redp2p_index_read_connection(ctx, i);
+        nread = redp2p_sock_read(ctx->conns[i].fd,
+            ctx->conns[i].buf + ctx->conns[i].buf_len,
+            (int)sizeof(ctx->conns[i].buf) - 1 - ctx->conns[i].buf_len);
+        if (nread <= 0) {
+            redp2p_lock(ctx);
+            redp2p_index_conn_remove(ctx, i);
+            redp2p_unlock(ctx);
+            continue;
+        }
+        ctx->conns[i].buf_len += nread;
+        ctx->conns[i].buf[ctx->conns[i].buf_len] = '\0';
+        method[0] = '\0';
+        path[0] = '\0';
+        body[0] = '\0';
+        http_status = 0;
+        redp2p_lock(ctx);
+        if (redp2p_index_request_parse(&ctx->conns[i], method,
+            (int)sizeof(method), path, (int)sizeof(path), body,
+            (int)sizeof(body), &http_status))
+        {
+            if (http_status == 0) {
+                redp2p_index_dispatch(ctx, ctx->conns[i].fd, path, body);
+            } else {
+                redp2p_http_write_response(ctx->conns[i].fd, http_status,
+                    http_status == 413 ? "Payload Too Large" :
+                    (http_status == 405 ? "Method Not Allowed" :
+                    (http_status == 501 ? "Not Implemented" :
+                    (http_status == 431 ? "Request Header Fields Too Large" :
+                    "Bad Request"))),
+                    "text/plain", REDP2P_CTRTOK_ERROR_MALFORMED);
+            }
+            redp2p_index_conn_remove(ctx, i);
+        }
+        redp2p_unlock(ctx);
     }
-    redp2p_unlock(ctx);
 }
 
 /**
@@ -5320,7 +5309,7 @@ static void redp2p_index_runtime_cleanup(redp2p_index_runtime_t *runtime) {
 
     redp2p_lock(runtime->ctx);
     for (i = runtime->ctx->n_conns - 1; i >= 0; i--)
-        redp2p_conn_remove(runtime->ctx, i);
+        redp2p_index_conn_remove(runtime->ctx, i);
     redp2p_unlock(runtime->ctx);
     if (!REDP2P_ISERR(runtime->listener_fd))
         REDP2P_FD_CLOSE(runtime->listener_fd);
@@ -5331,7 +5320,7 @@ static void redp2p_index_runtime_cleanup(redp2p_index_runtime_t *runtime) {
 }
 
 /**
- * Serves the blocking TCP rendezvous index lifecycle.
+ * Serves the blocking request-driven index lifecycle.
  * @param ctx Index context.
  * @param host Listener host or NULL for the wildcard address.
  * @param port Listener port.
@@ -5977,69 +5966,26 @@ static int redp2p_deregister_with_key(
     const char *id,
     const char *key)
 {
-    char cmd[REDP2P_BUF];
-    char reply[REDP2P_BUF];
-    redp2p_fd_t fd;
-    int connect_result;
-    int line_result;
+    JSON_Value *request;
+    JSON_Object *obj;
     int result;
 
     if (!key || key[0] == '\0') return REDP2P_ENOENT;
-
-    result = REDP2P_OK;
-    snprintf(cmd, sizeof(cmd), "%s%s:%s%s", REDP2P_CTRTOK_DEREGISTER,
-        id, REDP2P_CTRTOK_KEY, key);
-    fd = redp2p_control_connect(ctx, "deregister", index_host,
-        index_port, &connect_result);
-    if (REDP2P_ISERR(fd)) {
-        result = connect_result;
-        goto cleanup;
+    request = json_value_init_object();
+    if (!request) {
+        redp2p_set_error(ctx, "deregister: index request allocation failed");
+        return REDP2P_ERROR;
     }
-    if (redp2p_tcp_send(fd, cmd) != REDP2P_OK) {
-        REDP2P_FD_CLOSE(fd);
-        redp2p_set_error(ctx, "deregister: control write failed");
-        result = REDP2P_ENET;
-        goto cleanup;
-    }
-    line_result = redp2p_tcp_readline(fd, reply, (int)sizeof(reply), 5);
-    REDP2P_FD_CLOSE(fd);
-    if (line_result < 0) {
-        if (line_result == -1) {
-            redp2p_set_error(ctx, "deregister: control response timed out");
-            result = REDP2P_ETIMEOUT;
-        } else if (line_result == -3 || line_result == -4) {
-            redp2p_set_error(ctx, "deregister: malformed control response");
-            result = REDP2P_EPROTO;
-        } else {
-            redp2p_set_error(ctx, "deregister: control response failed");
-            result = REDP2P_ENET;
-        }
-        goto cleanup;
-    }
-
-    if (strcmp(reply, REDP2P_CTRTOK_OK) != 0) {
-        if (strcmp(reply, REDP2P_CTRTOK_ERROR_INVALID_KEY) == 0) {
-            redp2p_set_error(ctx,
-                "deregister: index rejected registration key");
-            result = REDP2P_EAUTH;
-        } else if (strncmp(reply, "REDP2P_CTRTOK_ERROR:",
-            strlen("REDP2P_CTRTOK_ERROR:")) == 0)
-        {
-            redp2p_set_error(ctx, "deregister: index protocol error: %s",
-                reply);
-            result = REDP2P_EPROTO;
-        } else {
-            redp2p_set_error(ctx, "deregister: index rejected key: %s", reply);
-            result = REDP2P_EPROTO;
-        }
-        goto cleanup;
-    }
+    obj = json_value_get_object(request);
+    json_object_set_string(obj, "op", "deregister");
+    json_object_set_string(obj, "id", id);
+    json_object_set_string(obj, "key", key);
+    result = redp2p_http_client(ctx, "deregister", index_host, index_port,
+        request, NULL);
+    json_value_free(request);
+    if (result != REDP2P_OK) return result;
     redp2p_set_error(ctx, NULL);
-
-cleanup:
-    crypto_wipe(cmd, sizeof(cmd));
-    crypto_wipe(reply, sizeof(reply));
-    return result;
+    return REDP2P_OK;
 }
 
 /**
@@ -6108,61 +6054,51 @@ int redp2p_list_publishers(
     redp2p_publisher_cb cb,
     void *userdata)
 {
-    redp2p_fd_t fd;
-    char line[REDP2P_BUF];
-    size_t prefix_len;
-
-    int connect_result;
+    JSON_Value *request;
+    JSON_Value *response;
+    JSON_Object *obj;
+    JSON_Object *out;
+    JSON_Array *ids;
+    size_t count;
+    size_t i;
+    int result;
 
     if (!ctx || !index_host || !index_host[0] || !cb) return REDP2P_ERROR;
     redp2p_set_error(ctx, NULL);
-    fd = redp2p_control_connect(ctx, "list", index_host, index_port,
-        &connect_result);
-    if (REDP2P_ISERR(fd)) return connect_result;
-    if (redp2p_tcp_send(fd, REDP2P_CTRTOK_LIST_PUBLISHERS) != REDP2P_OK) {
-        REDP2P_FD_CLOSE(fd);
-        redp2p_set_error(ctx, "list: control write failed");
-        return REDP2P_ENET;
+    request = json_value_init_object();
+    if (!request) {
+        redp2p_set_error(ctx, "list: index request allocation failed");
+        return REDP2P_ERROR;
     }
-    prefix_len = strlen(REDP2P_CTRTOK_PUBLISHER);
-    for (;;) {
-        int line_result;
-
-        line_result = redp2p_tcp_readline(fd, line, (int)sizeof(line),
-            REDP2P_ETIMEOUT_SEC);
-        if (line_result < 0)
-        {
-            REDP2P_FD_CLOSE(fd);
-            if (line_result == -1) {
-                redp2p_set_error(ctx, "list: control line timed out");
-                return REDP2P_ETIMEOUT;
-            }
-            if (line_result == -3 || line_result == -4) {
-                redp2p_set_error(ctx, "list: malformed control line");
-                return REDP2P_EPROTO;
-            }
-            redp2p_set_error(ctx, "list: control connection closed");
-            return REDP2P_ENET;
-        }
-        if (strcmp(line, REDP2P_CTRTOK_END) == 0) {
-            REDP2P_FD_CLOSE(fd);
-            redp2p_set_error(ctx, NULL);
-            return REDP2P_OK;
-        }
-        if (strncmp(line, REDP2P_CTRTOK_PUBLISHER, prefix_len) == 0) {
-            const char *id = line + prefix_len;
-            if (!redp2p_is_valid_id(id)) {
-                REDP2P_FD_CLOSE(fd);
-                redp2p_set_error(ctx, "list: malformed publisher id");
-                return REDP2P_EPROTO;
-            }
-            cb(id, userdata);
-            continue;
-        }
-        REDP2P_FD_CLOSE(fd);
-        redp2p_set_error(ctx, "list: unexpected control response: %s", line);
+    obj = json_value_get_object(request);
+    json_object_set_string(obj, "op", "list");
+    response = NULL;
+    result = redp2p_http_client(ctx, "list", index_host, index_port, request,
+        &response);
+    json_value_free(request);
+    if (result != REDP2P_OK) return result;
+    out = json_value_get_object(response);
+    if (!out || !json_object_has_value_of_type(out, "ids", JSONArray)) {
+        json_value_free(response);
+        redp2p_set_error(ctx, "list: malformed index response");
         return REDP2P_EPROTO;
     }
+    ids = json_object_get_array(out, "ids");
+    count = json_array_get_count(ids);
+    for (i = 0; i < count; i++) {
+        const char *id;
+
+        id = json_array_get_string(ids, i);
+        if (!id || !redp2p_is_valid_id(id)) {
+            json_value_free(response);
+            redp2p_set_error(ctx, "list: malformed publisher id");
+            return REDP2P_EPROTO;
+        }
+        cb(id, userdata);
+    }
+    json_value_free(response);
+    redp2p_set_error(ctx, NULL);
+    return REDP2P_OK;
 }
 
 /**
@@ -6184,14 +6120,12 @@ const char *self_id,
 unsigned short bind_port)
 {
     unsigned short effective_port;
-    int control_result;
 
     memset(runtime, 0, sizeof(*runtime));
     runtime->borrowed_ctx = ctx;
     runtime->borrowed_index_host = index_host;
     runtime->borrowed_self_id = self_id;
     runtime->index_port = index_port;
-    runtime->owned_control_fd = REDP2P_FD_INVALID;
     runtime->owned_udp_fd = REDP2P_FD_INVALID;
     if (ctx->proto != REDP2P_PROTO_TCP && ctx->proto != REDP2P_PROTO_UDP) {
         redp2p_set_error(ctx, "wait: invalid transport protocol");
@@ -6210,14 +6144,9 @@ unsigned short bind_port)
     ctx->bind_port = effective_port;
     runtime->borrowed_udp_any_host = redp2p_host_is_ipv6_literal(index_host) ?
         "::" : "0.0.0.0";
-    runtime->owned_control_fd = redp2p_control_connect(ctx, "wait", index_host,
-        index_port, &control_result);
-    if (REDP2P_ISERR(runtime->owned_control_fd)) return control_result;
     runtime->owned_udp_fd = redp2p_create_socket(
         runtime->borrowed_udp_any_host, 0);
     if (REDP2P_ISERR(runtime->owned_udp_fd)) {
-        REDP2P_FD_CLOSE(runtime->owned_control_fd);
-        runtime->owned_control_fd = REDP2P_FD_INVALID;
         return REDP2P_ENET;
     }
     return REDP2P_OK;
@@ -6226,140 +6155,130 @@ unsigned short bind_port)
 /**
  * Completes the registration challenge, proof, and response exchange.
  * @param runtime Initialized publisher runtime.
- * @param response Registration response buffer.
- * @param response_size Registration response buffer size.
  * @return REDP2P_OK on success, or a negative error code on failure.
  */
 static int redp2p_publisher_register(
-redp2p_publisher_runtime_t *runtime,
-char *response,
-size_t response_size)
+redp2p_publisher_runtime_t *runtime)
 {
     redp2p_t *ctx;
-    char send_buf[REDP2P_BUF];
+    JSON_Value *request;
+    JSON_Value *response;
+    JSON_Object *obj;
+    JSON_Object *out;
     char nonce[17];
     char solution[17];
     char proof[65];
-    unsigned int challenge_bits;
-    int control_result;
+    redp2p_candidate_t candidates[REDP2P_PEER_CANDIDATES_MAX];
+    int candidate_count;
+    int bits;
     int result;
 
     ctx = runtime->borrowed_ctx;
     memset(nonce, 0, sizeof(nonce));
     memset(solution, 0, sizeof(solution));
     memset(proof, 0, sizeof(proof));
-    snprintf(send_buf, sizeof(send_buf), "%s%s", REDP2P_CTRTOK_REGISTER,
-        runtime->borrowed_self_id);
-    control_result = redp2p_tcp_send(runtime->owned_control_fd, send_buf);
-    if (control_result == REDP2P_OK)
-        control_result = redp2p_tcp_readline(runtime->owned_control_fd, response,
-            (int)response_size, 10);
-    if (control_result < 0) {
-        if (control_result == -1) {
-            redp2p_set_error(ctx, "wait: registration challenge timed out");
-            result = REDP2P_ETIMEOUT;
-        } else if (control_result == -3 || control_result == -4) {
-            redp2p_set_error(ctx,
-                "wait: malformed registration challenge line");
-            result = REDP2P_EPROTO;
-        } else {
-            redp2p_set_error(ctx,
-                "wait: registration challenge transport failed");
-            result = REDP2P_ENET;
-        }
-        goto cleanup;
-    }
-    if (strncmp(response, REDP2P_CTRTOK_CHALLENGE,
-        strlen(REDP2P_CTRTOK_CHALLENGE)) != 0)
+    candidate_count = 0;
+    if (redp2p_gather_candidates(ctx, runtime->owned_udp_fd, candidates,
+        REDP2P_PEER_CANDIDATES_MAX, &candidate_count) != REDP2P_OK)
     {
-        redp2p_set_error(ctx, "wait: unexpected registration challenge: %s",
-            response);
-        result = REDP2P_EPROTO;
+        redp2p_set_error(ctx, "wait: local candidate gather failed");
+        result = REDP2P_ENET;
         goto cleanup;
     }
-    if (!redp2p_parse_challenge(response, nonce, &challenge_bits)) {
+    request = json_value_init_object();
+    if (!request) {
+        redp2p_set_error(ctx, "wait: registration request allocation failed");
+        result = REDP2P_ERROR;
+        goto cleanup;
+    }
+    obj = json_value_get_object(request);
+    json_object_set_string(obj, "op", "challenge");
+    json_object_set_string(obj, "id", runtime->borrowed_self_id);
+    response = NULL;
+    result = redp2p_http_client(ctx, "wait", runtime->borrowed_index_host,
+        runtime->index_port, request, &response);
+    json_value_free(request);
+    if (result != REDP2P_OK) goto cleanup;
+    out = json_value_get_object(response);
+    if (!out || !redp2p_index_require_hex(out, "nonce", nonce,
+        sizeof(nonce), 16) ||
+        !json_object_has_value_of_type(out, "bits", JSONNumber))
+    {
+        json_value_free(response);
         redp2p_set_error(ctx, "wait: malformed registration challenge");
         result = REDP2P_EPROTO;
         goto cleanup;
     }
+    bits = (int)json_object_get_number(out, "bits");
+    json_value_free(response);
     fprintf(stderr, "redp2p: connecting...\n");
     if (!redp2p_solve_register_pow(ctx, ctx->pass, nonce,
-        runtime->borrowed_self_id, (int)challenge_bits, solution,
-        sizeof(solution), proof, sizeof(proof)))
+        runtime->borrowed_self_id, bits, solution, sizeof(solution),
+        proof, sizeof(proof)))
     {
         redp2p_set_error(ctx, "wait: registration proof solve failed");
         result = REDP2P_ERROR;
         goto cleanup;
     }
-    snprintf(send_buf, sizeof(send_buf), "%s%s:%s%s:%s%s",
-        REDP2P_CTRTOK_REGISTER, runtime->borrowed_self_id,
-        REDP2P_CTRTOK_SOLUTION, solution, REDP2P_CTRTOK_PROOF, proof);
-    control_result = redp2p_tcp_send(runtime->owned_control_fd, send_buf);
-    if (control_result == REDP2P_OK)
-        control_result = redp2p_tcp_readline(runtime->owned_control_fd, response,
-            (int)response_size, 10);
-    if (control_result < 0) {
-        if (control_result == -1) {
-            redp2p_set_error(ctx, "wait: registration response timed out");
-            result = REDP2P_ETIMEOUT;
-        } else if (control_result == -3 || control_result == -4) {
-            redp2p_set_error(ctx,
-                "wait: malformed registration response line");
-            result = REDP2P_EPROTO;
-        } else {
-            redp2p_set_error(ctx, "wait: registration response failed");
-            result = REDP2P_ENET;
-        }
+    request = json_value_init_object();
+    if (!request) {
+        redp2p_set_error(ctx, "wait: registration request allocation failed");
+        result = REDP2P_ERROR;
         goto cleanup;
     }
+    obj = json_value_get_object(request);
+    json_object_set_string(obj, "op", "register");
+    json_object_set_string(obj, "id", runtime->borrowed_self_id);
+    json_object_set_string(obj, "nonce", nonce);
+    json_object_set_string(obj, "solution", solution);
+    json_object_set_string(obj, "proof", proof);
+    if (ctx->pass[0] != '\0')
+        json_object_set_string(obj, "pass", ctx->pass);
+    json_object_set_number(obj, "proto", (double)ctx->proto);
+    json_object_set_number(obj, "udp_port", (double)ctx->bind_port);
+    redp2p_index_append_candidates(obj, "candidates", candidates,
+        candidate_count);
+    response = NULL;
+    result = redp2p_http_client(ctx, "wait", runtime->borrowed_index_host,
+        runtime->index_port, request, &response);
+    json_value_free(request);
+    if (result != REDP2P_OK) goto cleanup;
+    out = json_value_get_object(response);
+    if (!out || !redp2p_index_require_hex(out, "key", ctx->key,
+        REDP2P_KEY_STR_SZ, REDP2P_KEY_SZ))
+    {
+        json_value_free(response);
+        redp2p_set_error(ctx, "wait: malformed registration response");
+        result = REDP2P_EPROTO;
+        goto cleanup;
+    }
+    json_value_free(response);
     result = REDP2P_OK;
 
 cleanup:
     crypto_wipe(nonce, sizeof(nonce));
     crypto_wipe(solution, sizeof(solution));
     crypto_wipe(proof, sizeof(proof));
-    crypto_wipe(send_buf, sizeof(send_buf));
     return result;
 }
 
 /**
  * Persists the registration key and rolls registration back on failure.
  * @param runtime Registered publisher runtime.
- * @param response Registration response containing the key.
  * @return REDP2P_OK on success, or a negative error code on failure.
  */
 static int redp2p_publisher_persist_registration(
-redp2p_publisher_runtime_t *runtime,
-const char *response)
+redp2p_publisher_runtime_t *runtime)
 {
     redp2p_t *ctx;
     redp2p_key_paths_t paths;
-    char observed_key[REDP2P_KEY_STR_SZ];
     int path_result;
-    int result;
 
     ctx = runtime->borrowed_ctx;
-    memset(observed_key, 0, sizeof(observed_key));
-    if (!redp2p_parse_ok_key(response, observed_key)) {
-        fprintf(stderr, "redp2p: registration failed: %s\n", response);
-        if (strcmp(response, REDP2P_CTRTOK_AUTH_FAILED) == 0) {
-            redp2p_set_error(ctx, "wait: registration authentication failed");
-            result = REDP2P_EAUTH;
-        } else if (strcmp(response,
-            REDP2P_CTRTOK_ERROR_PEER_TABLE_FULL) == 0)
-        {
-            redp2p_set_error(ctx, "wait: index peer table is full");
-            result = REDP2P_EFULL;
-        } else {
-            redp2p_set_error(ctx, "wait: malformed registration response: %s",
-                response);
-            result = REDP2P_EPROTO;
-        }
-        crypto_wipe(observed_key, sizeof(observed_key));
-        return result;
+    if (ctx->key[0] == '\0') {
+        redp2p_set_error(ctx, "wait: registration returned no key");
+        return REDP2P_EPROTO;
     }
-    memcpy(ctx->key, observed_key, REDP2P_KEY_STR_SZ);
-    ctx->key[REDP2P_KEY_STR_SZ - 1] = '\0';
     path_result = redp2p_key_paths(ctx, runtime->borrowed_index_host,
         runtime->index_port, runtime->borrowed_self_id, &paths);
     if (path_result != REDP2P_OK ||
@@ -6370,10 +6289,8 @@ const char *response)
         if (path_result == REDP2P_OK)
             redp2p_remove_key(NULL, paths.scoped, ctx->key);
         ctx->key[0] = '\0';
-        crypto_wipe(observed_key, sizeof(observed_key));
         return REDP2P_ERROR;
     }
-    crypto_wipe(observed_key, sizeof(observed_key));
     return REDP2P_OK;
 }
 
@@ -6470,77 +6387,6 @@ redp2p_publisher_runtime_t *runtime)
 }
 
 /**
- * Reads the complete candidate block following one punch call line.
- * @param runtime Publisher runtime owning the control descriptor.
- * @param message Message buffer containing the punch call line.
- * @param message_size Message buffer size.
- * @return 1 for a complete block, 0 for ignored framing, or -1 on error.
- */
-static int redp2p_publisher_read_candidate_block(
-redp2p_publisher_runtime_t *runtime,
-char *message,
-size_t message_size)
-{
-    char line[128];
-    int saw_end;
-    int line_result;
-
-    saw_end = 0;
-    while ((line_result = redp2p_tcp_readline(runtime->owned_control_fd, line,
-        sizeof(line), 5)) > 0)
-    {
-        if (!redp2p_append_text(message, message_size, "\n") ||
-            !redp2p_append_text(message, message_size, line))
-            break;
-        if (strcmp(line, REDP2P_CTRTOK_END) == 0) {
-            saw_end = 1;
-            break;
-        }
-    }
-    if (line_result < 0) {
-        redp2p_set_error(runtime->borrowed_ctx,
-            "wait: incomplete candidate block");
-        return -1;
-    }
-    if (saw_end && !redp2p_append_text(message, message_size, "\n")) return 0;
-    if (!saw_end) return 0;
-    return 1;
-}
-
-/**
- * Sends the publisher ACK and its exact candidate framing.
- * @param runtime Publisher runtime owning control and UDP descriptors.
- * @param connection_id Consumer identifier.
- * @param session_token Session token used by the punch exchange.
- * @return 1 when framing completed, or 0 when the event must be ignored.
- */
-static int redp2p_publisher_send_ack(
-redp2p_publisher_runtime_t *runtime,
-const char *connection_id,
-const char *session_token)
-{
-    redp2p_candidate_t candidates[REDP2P_CANDIDATES_MAX];
-    char ack_buf[REDP2P_BUF];
-    int candidate_count;
-    int i;
-
-    candidate_count = 0;
-    redp2p_gather_candidates(runtime->borrowed_ctx, runtime->owned_udp_fd,
-        candidates, REDP2P_CANDIDATES_MAX, &candidate_count);
-    snprintf(ack_buf, sizeof(ack_buf), "%s%s:%s:%s\n",
-        REDP2P_CTRTOK_PUNCH_ACK2, runtime->borrowed_self_id, connection_id,
-        session_token);
-    for (i = 0; i < candidate_count; i++) {
-        if (!redp2p_append_candidate(ack_buf, sizeof(ack_buf), &candidates[i]))
-            continue;
-    }
-    if (!redp2p_append_text(ack_buf, sizeof(ack_buf), REDP2P_CTRTOK_END "\n"))
-        return 0;
-    redp2p_tcp_send(runtime->owned_control_fd, ack_buf);
-    return 1;
-}
-
-/**
  * Selects a direct peer endpoint while preserving nonfatal punch failures.
  * @param runtime Publisher runtime owning the UDP descriptor.
  * @param connection_id Consumer identifier.
@@ -6623,59 +6469,69 @@ const struct sockaddr_storage *peer_addr)
 }
 
 /**
- * Handles one complete publisher punch-call operation.
- * @param runtime Publisher runtime owning control, UDP, and session state.
- * @param message Buffer containing the first control line.
- * @param message_size Control message buffer size.
- * @return 0 to continue this iteration, 1 to skip it, or -1 on error.
+ * Processes one publisher punch_poll reply containing pending calls.
+ * @param runtime Publisher runtime owning UDP and session state.
+ * @param out     Punch poll reply object.
+ * @return REDP2P_OK on success, or a negative error code on failure.
  */
-static int redp2p_publisher_handle_punch_call(
+static int redp2p_publisher_process_punch_calls(
 redp2p_publisher_runtime_t *runtime,
-char *message,
-size_t message_size)
+JSON_Object *out)
 {
-    redp2p_candidate_t remote_candidates[REDP2P_CANDIDATES_MAX];
-    struct sockaddr_storage peer_addr;
-    char connection_id[REDP2P_ID_MAX + 1];
-    char remote_token[REDP2P_CTRL_SESSION_MAX + 1];
-    char session_hex[REDP2P_STREAM_SESSION_ID_SZ * 2 + 1];
-    unsigned char session_id[REDP2P_STREAM_SESSION_ID_SZ];
-    const char *ack_session;
-    int candidate_count;
-    int block_result;
+    JSON_Array *calls;
+    size_t count;
+    size_t i;
 
-    memset(session_hex, 0, sizeof(session_hex));
-    if (!redp2p_parse_punch_call2(message, connection_id, remote_token))
-        return 0;
-    if (runtime->borrowed_ctx->proto == REDP2P_PROTO_TCP) {
-        if (!redp2p_is_hex_token(remote_token,
-            REDP2P_STREAM_SESSION_ID_SZ * 2))
-            return 1;
-        memcpy(session_hex, remote_token, REDP2P_STREAM_SESSION_ID_SZ * 2);
-        session_hex[REDP2P_STREAM_SESSION_ID_SZ * 2] = '\0';
-        if (!redp2p_hex_decode(session_hex, session_id, sizeof(session_id)))
-            return 1;
+    if (!out || !json_object_has_value_of_type(out, "calls", JSONArray)) {
+        redp2p_set_error(runtime->borrowed_ctx,
+            "wait: malformed punch poll response");
+        return REDP2P_EPROTO;
     }
-    block_result = redp2p_publisher_read_candidate_block(runtime, message,
-        message_size);
-    if (block_result < 0) return -1;
-    if (block_result == 0) return 1;
-    candidate_count = 0;
-    if (!redp2p_parse_remote_candidates(message, remote_candidates,
-        &candidate_count))
-        return 1;
-    ack_session = session_hex[0] ? session_hex : remote_token;
-    if (!redp2p_publisher_send_ack(runtime, connection_id, ack_session))
-        return 1;
-    if (!redp2p_publisher_select_peer(runtime, connection_id, ack_session,
-        remote_candidates, candidate_count, &peer_addr))
-        return 1;
-    if (!redp2p_publisher_open_session(runtime, session_hex,
-        session_id, &peer_addr))
-        return 1;
-    redp2p_sendto_addr(runtime->owned_udp_fd, REDP2P_CTRTOK_PUNCH_SERVER,
-        strlen(REDP2P_CTRTOK_PUNCH_SERVER), &peer_addr);
-    return 0;
+    calls = json_object_get_array(out, "calls");
+    count = json_array_get_count(calls);
+    for (i = 0; i < count; i++) {
+        JSON_Object *call;
+        const char *connection_id;
+        const char *remote_token;
+        redp2p_candidate_t remote_candidates[REDP2P_PEER_CANDIDATES_MAX];
+        struct sockaddr_storage peer_addr;
+        char session_hex[REDP2P_STREAM_SESSION_ID_SZ * 2 + 1];
+        unsigned char session_id[REDP2P_STREAM_SESSION_ID_SZ];
+        int candidate_count;
+
+        memset(session_hex, 0, sizeof(session_hex));
+        memset(session_id, 0, sizeof(session_id));
+        call = json_array_get_object(calls, i);
+        if (!call) return REDP2P_EPROTO;
+        connection_id = json_object_get_string(call, "self_id");
+        remote_token = json_object_get_string(call, "session");
+        if (!connection_id || !redp2p_is_valid_id(connection_id) ||
+            !remote_token || !redp2p_is_session_token(remote_token) ||
+            !redp2p_index_parse_candidates(call, "candidates",
+                remote_candidates, &candidate_count))
+            return REDP2P_EPROTO;
+        if (runtime->borrowed_ctx->proto == REDP2P_PROTO_TCP) {
+            if (!redp2p_is_hex_token(remote_token,
+                REDP2P_STREAM_SESSION_ID_SZ * 2))
+                continue;
+            memcpy(session_hex, remote_token, REDP2P_STREAM_SESSION_ID_SZ * 2);
+            session_hex[REDP2P_STREAM_SESSION_ID_SZ * 2] = '\0';
+            if (!redp2p_hex_decode(session_hex, session_id,
+                sizeof(session_id)))
+                continue;
+        } else {
+            snprintf(session_hex, sizeof(session_hex), "%s", remote_token);
+        }
+        if (!redp2p_publisher_select_peer(runtime, connection_id,
+            session_hex, remote_candidates, candidate_count, &peer_addr))
+            continue;
+        if (!redp2p_publisher_open_session(runtime, session_hex,
+            session_id, &peer_addr))
+            continue;
+        redp2p_sendto_addr(runtime->owned_udp_fd, REDP2P_CTRTOK_PUNCH_SERVER,
+            strlen(REDP2P_CTRTOK_PUNCH_SERVER), &peer_addr);
+    }
+    return REDP2P_OK;
 }
 
 /**
@@ -6697,8 +6553,7 @@ int *max_fd)
     ctx = runtime->borrowed_ctx;
     FD_ZERO(read_fds);
     *max_fd = -1;
-    if (!redp2p_fdset_add(runtime->owned_control_fd, read_fds, max_fd) ||
-        !redp2p_fdset_add(runtime->owned_udp_fd, read_fds, max_fd))
+    if (!redp2p_fdset_add(runtime->owned_udp_fd, read_fds, max_fd))
     {
         redp2p_set_error(ctx,
             "wait: essential descriptor cannot be represented by fd_set");
@@ -6725,61 +6580,126 @@ int *max_fd)
 }
 
 /**
- * Sends a due publisher control heartbeat.
- * @param runtime Publisher runtime owning the control descriptor.
- * @return REDP2P_OK on success, or REDP2P_ENET on send failure.
+ * Re-registers the publisher and refreshes its persisted key after expiry.
+ * @param runtime Publisher runtime owning UDP and identity state.
+ * @return REDP2P_OK on success, or a negative error code on failure.
  */
-static int redp2p_publisher_heartbeat(
+static int redp2p_publisher_reregister(
 redp2p_publisher_runtime_t *runtime)
 {
-    char send_buf[REDP2P_BUF];
+    redp2p_t *ctx;
+    redp2p_key_paths_t paths;
+    int result;
 
-    if (redp2p_now_s() - runtime->last_heartbeat < REDP2P_HEARTBEAT_S)
-        return REDP2P_OK;
-    snprintf(send_buf, sizeof(send_buf), "%s%s", REDP2P_CTRTOK_REGISTER,
-        runtime->borrowed_self_id);
-    if (redp2p_tcp_send(runtime->owned_control_fd, send_buf) != REDP2P_OK) {
-        redp2p_set_error(runtime->borrowed_ctx,
-            "wait: control heartbeat send failed");
-        return REDP2P_ENET;
+    ctx = runtime->borrowed_ctx;
+    result = redp2p_publisher_register(runtime);
+    if (result != REDP2P_OK) return result;
+    if (redp2p_key_paths(ctx, runtime->borrowed_index_host,
+        runtime->index_port, runtime->borrowed_self_id, &paths) == REDP2P_OK &&
+        redp2p_save_key(ctx, &paths, ctx->key) != REDP2P_OK)
+    {
+        redp2p_deregister_with_key(NULL, runtime->borrowed_index_host,
+            runtime->index_port, runtime->borrowed_self_id, ctx->key);
+        ctx->key[0] = '\0';
+        return REDP2P_ERROR;
     }
-    runtime->last_heartbeat = redp2p_now_s();
     return REDP2P_OK;
 }
 
 /**
- * Processes one ready publisher control event.
- * @param runtime Publisher runtime owning control and session state.
- * @param read_fds Descriptor set returned by select.
- * @return 0 to continue, 1 to skip the iteration, or a negative error code.
+ * Sends one due publisher heartbeat, re-registering when the record expired.
+ * @param runtime Publisher runtime owning UDP and identity state.
+ * @return REDP2P_OK on success, or a negative error code on failure.
  */
-static int redp2p_publisher_process_control(
-redp2p_publisher_runtime_t *runtime,
-const fd_set *read_fds)
+static int redp2p_publisher_heartbeat(
+redp2p_publisher_runtime_t *runtime)
 {
-    char recv_buf[REDP2P_BUF];
-    int control_result;
-    int punch_result;
+    redp2p_t *ctx;
+    JSON_Value *request;
+    JSON_Value *response;
+    JSON_Object *obj;
+    redp2p_candidate_t candidates[REDP2P_PEER_CANDIDATES_MAX];
+    int candidate_count;
+    int result;
 
-    if (!FD_ISSET(runtime->owned_control_fd, read_fds)) return 0;
-    control_result = redp2p_tcp_readline(runtime->owned_control_fd, recv_buf,
-        (int)sizeof(recv_buf), 0);
-    if (control_result < 0) {
-        if (control_result == -3 || control_result == -4) {
-            redp2p_set_error(runtime->borrowed_ctx,
-                "wait: invalid control line");
-            return REDP2P_EPROTO;
-        }
-        redp2p_set_error(runtime->borrowed_ctx, control_result == -2 ?
-            "wait: index closed control connection" :
-            "wait: control receive failed");
+    ctx = runtime->borrowed_ctx;
+    if (redp2p_now_s() - runtime->last_heartbeat < REDP2P_HEARTBEAT_S)
+        return REDP2P_OK;
+    if (ctx->key[0] == '\0') return REDP2P_ENOENT;
+    candidate_count = 0;
+    if (redp2p_gather_candidates(ctx, runtime->owned_udp_fd, candidates,
+        REDP2P_PEER_CANDIDATES_MAX, &candidate_count) != REDP2P_OK)
+    {
+        redp2p_set_error(ctx, "wait: local candidate gather failed");
         return REDP2P_ENET;
     }
-    if (control_result == 0) return 0;
-    punch_result = redp2p_publisher_handle_punch_call(runtime, recv_buf,
-        sizeof(recv_buf));
-    if (punch_result < 0) return REDP2P_EPROTO;
-    return punch_result;
+    request = json_value_init_object();
+    if (!request) {
+        redp2p_set_error(ctx, "wait: heartbeat request allocation failed");
+        return REDP2P_ERROR;
+    }
+    obj = json_value_get_object(request);
+    json_object_set_string(obj, "op", "heartbeat");
+    json_object_set_string(obj, "id", runtime->borrowed_self_id);
+    json_object_set_string(obj, "key", ctx->key);
+    json_object_set_number(obj, "proto", (double)ctx->proto);
+    json_object_set_number(obj, "udp_port", (double)ctx->bind_port);
+    redp2p_index_append_candidates(obj, "candidates", candidates,
+        candidate_count);
+    response = NULL;
+    result = redp2p_http_client(ctx, "wait", runtime->borrowed_index_host,
+        runtime->index_port, request, &response);
+    json_value_free(request);
+    if (response) json_value_free(response);
+    if (result == REDP2P_OK || result == REDP2P_ENOENT ||
+        result == REDP2P_EAUTH)
+    {
+        if (result != REDP2P_OK) result = redp2p_publisher_reregister(runtime);
+        if (result == REDP2P_OK)
+            runtime->last_heartbeat = redp2p_now_s();
+    }
+    return result;
+}
+
+/**
+ * Polls the index for pending punch calls and processes them.
+ * @param runtime Publisher runtime owning UDP and session state.
+ * @return REDP2P_OK on success, or a negative error code on failure.
+ */
+static int redp2p_publisher_punch_poll(
+redp2p_publisher_runtime_t *runtime)
+{
+    redp2p_t *ctx;
+    JSON_Value *request;
+    JSON_Value *response;
+    JSON_Object *obj;
+    JSON_Object *out;
+    int result;
+
+    ctx = runtime->borrowed_ctx;
+    if (redp2p_now_ms() - runtime->last_punch_poll < REDP2P_PUNCH_POLL_MS)
+        return REDP2P_OK;
+    request = json_value_init_object();
+    if (!request) {
+        redp2p_set_error(ctx, "wait: punch poll request allocation failed");
+        return REDP2P_ERROR;
+    }
+    obj = json_value_get_object(request);
+    json_object_set_string(obj, "op", "punch_poll");
+    json_object_set_string(obj, "id", runtime->borrowed_self_id);
+    response = NULL;
+    result = redp2p_http_client(ctx, "wait", runtime->borrowed_index_host,
+        runtime->index_port, request, &response);
+    json_value_free(request);
+    if (result != REDP2P_OK) {
+        runtime->last_punch_poll = redp2p_now_ms();
+        return result;
+    }
+    out = json_value_get_object(response);
+    result = redp2p_publisher_process_punch_calls(runtime, out);
+    json_value_free(response);
+    runtime->last_punch_poll = redp2p_now_ms();
+    return result;
 }
 
 /**
@@ -6993,6 +6913,13 @@ static uint32_t redp2p_publisher_wait_ms(
 
     wait_ms = 1000;
     now = redp2p_now_ms();
+    {
+        int64_t until_poll = (int64_t)runtime->last_punch_poll +
+            REDP2P_PUNCH_POLL_MS - (int64_t)now;
+
+        if (until_poll < 1) until_poll = 1;
+        if ((uint64_t)until_poll < wait_ms) wait_ms = (uint32_t)until_poll;
+    }
     for (i = 0; i < runtime->session_count; i++) {
         if (!runtime->owned_sessions[i].active ||
             !runtime->owned_sessions[i].is_tcp)
@@ -7022,7 +6949,7 @@ redp2p_publisher_runtime_t *runtime)
 
     result = REDP2P_OK;
     runtime->last_heartbeat = redp2p_now_s();
-    redp2p_set_nonblock(runtime->owned_control_fd);
+    runtime->last_punch_poll = redp2p_now_ms();
     redp2p_set_nonblock(runtime->owned_udp_fd);
     while (!runtime->borrowed_ctx->stop_requested) {
         stage_result = redp2p_publisher_build_fdset(runtime, &read_fds, &max_fd);
@@ -7042,14 +6969,10 @@ redp2p_publisher_runtime_t *runtime)
             result = stage_result;
             break;
         }
-        stage_result = redp2p_publisher_process_control(runtime, &read_fds);
-        if (stage_result < 0) {
+        stage_result = redp2p_publisher_punch_poll(runtime);
+        if (stage_result != REDP2P_OK) {
             result = stage_result;
             break;
-        }
-        if (stage_result > 0) {
-            redp2p_publisher_maintain_sessions(runtime);
-            continue;
         }
         stage_result = redp2p_publisher_receive_peer(runtime, &read_fds);
         if (stage_result < 0) {
@@ -7125,11 +7048,8 @@ int reset_stop)
             sizeof(*runtime->owned_sessions));
     free(runtime->owned_sessions);
     runtime->owned_sessions = NULL;
-    if (!REDP2P_ISERR(runtime->owned_control_fd))
-        REDP2P_FD_CLOSE(runtime->owned_control_fd);
     if (!REDP2P_ISERR(runtime->owned_udp_fd))
         REDP2P_FD_CLOSE(runtime->owned_udp_fd);
-    runtime->owned_control_fd = REDP2P_FD_INVALID;
     runtime->owned_udp_fd = REDP2P_FD_INVALID;
     if (reset_stop)
         atomic_store(&runtime->borrowed_ctx->stop_requested, 0);
@@ -7147,7 +7067,6 @@ int redp2p_wait(
     unsigned short bind_port)
 {
     redp2p_publisher_runtime_t runtime;
-    char registration_response[REDP2P_BUF];
     int wait_result;
 
     if (!ctx) return REDP2P_EINVAL;
@@ -7159,14 +7078,12 @@ int redp2p_wait(
     wait_result = redp2p_publisher_initialize(&runtime, ctx, index_host,
         index_port, self_id, bind_port);
     if (wait_result != REDP2P_OK) return wait_result;
-    wait_result = redp2p_publisher_register(&runtime, registration_response,
-        sizeof(registration_response));
+    wait_result = redp2p_publisher_register(&runtime);
     if (wait_result != REDP2P_OK) {
         redp2p_publisher_runtime_cleanup(&runtime, 0);
         return wait_result;
     }
-    wait_result = redp2p_publisher_persist_registration(&runtime,
-        registration_response);
+    wait_result = redp2p_publisher_persist_registration(&runtime);
     if (wait_result != REDP2P_OK) {
         redp2p_publisher_runtime_cleanup(&runtime, 0);
         return wait_result;
@@ -7182,140 +7099,43 @@ int redp2p_wait(
 }
 
 /**
- * Send punch req cands.
- * Summary: Send punch request with candidates.
- * @param ctrl_fd Control fd.
- * @param self_id Self id.
- * @param target_id Target id.
- * @param cands Candidates.
- * @param cand_count Candidate count.
- * @param remote_cands Remote candidates.
- * @param remote_cand_count Remote candidate count.
- * @return 0 on success, -1 on error.
+ * Sends one HTTP punch request carrying the local candidates.
+ * @param runtime Consumer runtime owning index, identity, and session settings.
+ * @param session_hex Session token used by the punch exchange.
+ * @param cands Local candidates.
+ * @param cand_count Local candidate count.
+ * @return REDP2P_OK on success, or a negative error code on failure.
  */
 static int redp2p_send_punch_req_cands(
-    redp2p_t *ctx,
-    redp2p_fd_t ctrl_fd,
-    const char *self_id,
-    const char *target_id,
-    const char *session_id,
-    redp2p_candidate_t *cands,
-    int cand_count,
-    redp2p_candidate_t *remote_cands,
-    int *remote_cand_count)
+redp2p_consumer_runtime_t *runtime,
+const char *session_hex,
+const redp2p_candidate_t *cands,
+int cand_count)
 {
-    char send_buf[REDP2P_BUF];
-    char recv_buf[REDP2P_BUF];
-    int line_result;
-    int n;
-    
-    if (!cands || cand_count <= 0 ||
-        cand_count > REDP2P_CANDIDATES_MAX || !remote_cands ||
-        !remote_cand_count)
-        return REDP2P_EPROTO;
-    *remote_cand_count = 0;
-    n = snprintf(send_buf, sizeof(send_buf), "%s%s:%s:%s\n",
-        REDP2P_CTRTOK_PUNCH_REQ2, self_id, target_id,
-        session_id ? session_id : "0");
-    if (n < 0 || (size_t)n >= sizeof(send_buf)) {
-        redp2p_set_error(ctx, "connect: punch request is too large");
-        return REDP2P_EPROTO;
-    }
-    for (int i = 0; i < cand_count; i++) {
-        if (!redp2p_append_candidate(send_buf, sizeof(send_buf), &cands[i])) {
-            redp2p_set_error(ctx, "connect: invalid local punch candidate");
-            return REDP2P_EPROTO;
-        }
-    }
-    if (!redp2p_append_text(send_buf, sizeof(send_buf), REDP2P_CTRTOK_END "\n")) {
-        redp2p_set_error(ctx, "connect: punch request is too large");
-        return REDP2P_EPROTO;
-    }
-    
-    if (redp2p_tcp_send(ctrl_fd, send_buf) != REDP2P_OK) {
-        redp2p_set_error(ctx, "connect: punch control write failed");
-        return REDP2P_ENET;
-    }
-    line_result = redp2p_tcp_readline(ctrl_fd, recv_buf,
-        (int)sizeof(recv_buf), 20);
-    if (line_result < 0) {
-        if (line_result == -1) {
-            redp2p_set_error(ctx, "connect: punch response timed out");
-            return REDP2P_ETIMEOUT;
-        }
-        if (line_result == -3 || line_result == -4) {
-            redp2p_set_error(ctx, "connect: malformed punch response line");
-            return REDP2P_EPROTO;
-        }
-        redp2p_set_error(ctx, "connect: punch control connection closed");
-        return REDP2P_ENET;
-    }
-    
-    if (strncmp(recv_buf, REDP2P_CTRTOK_PUNCH_OK2,
-        strlen(REDP2P_CTRTOK_PUNCH_OK2)) == 0) {
-        char lbuf[128];
-        char ok_id[REDP2P_ID_MAX + 1];
-        char ok_sess[REDP2P_CTRL_SESSION_MAX + 1];
-        int saw_end = 0;
-        if (!redp2p_parse_punch_ok2(recv_buf, ok_id, ok_sess)) {
-            redp2p_set_error(ctx, "connect: malformed punch response");
-            return REDP2P_EPROTO;
-        }
-        if (strcmp(ok_id, target_id) != 0 ||
-            strcmp(ok_sess, session_id ? session_id : "0") != 0) {
-            redp2p_set_error(ctx, "connect: punch response identity mismatch");
-            return REDP2P_EPROTO;
-        }
+    redp2p_t *ctx;
+    JSON_Value *request;
+    JSON_Object *obj;
+    int result;
 
-        while ((line_result = redp2p_tcp_readline(ctrl_fd, lbuf,
-            sizeof(lbuf), 5)) > 0)
-        {
-            if (!redp2p_append_text(recv_buf, sizeof(recv_buf), "\n") ||
-                !redp2p_append_text(recv_buf, sizeof(recv_buf), lbuf)) {
-                redp2p_set_error(ctx,
-                    "connect: punch candidate response is too large");
-                return REDP2P_EPROTO;
-            }
-            if (strcmp(lbuf, REDP2P_CTRTOK_END) == 0) {
-                saw_end = 1;
-                break;
-            }
-        }
-        if (line_result < 0) {
-            if (line_result == -1) {
-                redp2p_set_error(ctx,
-                    "connect: punch candidate line timed out");
-                return REDP2P_ETIMEOUT;
-            }
-            if (line_result == -3 || line_result == -4) {
-                redp2p_set_error(ctx,
-                    "connect: malformed punch candidate line");
-                return REDP2P_EPROTO;
-            }
-            redp2p_set_error(ctx,
-                "connect: punch candidate connection closed");
-            return REDP2P_ENET;
-        }
-        if (saw_end && !redp2p_append_text(recv_buf, sizeof(recv_buf), "\n")) {
-            redp2p_set_error(ctx,
-                "connect: punch candidate response is too large");
-            return REDP2P_EPROTO;
-        }
-        if (!saw_end) {
-            redp2p_set_error(ctx, "connect: incomplete punch candidate block");
-            return REDP2P_EPROTO;
-        }
-        if (!redp2p_parse_remote_candidates(recv_buf, remote_cands,
-            remote_cand_count)) {
-            redp2p_set_error(ctx, "connect: malformed punch candidate block");
-            return REDP2P_EPROTO;
-        }
-    } else {
-        redp2p_set_error(ctx, "connect: unexpected punch response: %s",
-            recv_buf);
+    ctx = runtime->ctx;
+    if (!cands || cand_count <= 0 ||
+        cand_count > REDP2P_PEER_CANDIDATES_MAX || !session_hex)
         return REDP2P_EPROTO;
+    request = json_value_init_object();
+    if (!request) {
+        redp2p_set_error(ctx, "connect: punch request allocation failed");
+        return REDP2P_ERROR;
     }
-    return REDP2P_OK;
+    obj = json_value_get_object(request);
+    json_object_set_string(obj, "op", "punch_req");
+    json_object_set_string(obj, "self_id", runtime->self_id);
+    json_object_set_string(obj, "target_id", runtime->target_id);
+    json_object_set_string(obj, "session", session_hex);
+    redp2p_index_append_candidates(obj, "candidates", cands, cand_count);
+    result = redp2p_http_client(ctx, "connect", runtime->index_host,
+        runtime->index_port, request, NULL);
+    json_value_free(request);
+    return result;
 }
 
 /**
@@ -7419,14 +7239,10 @@ unsigned char session_bin[REDP2P_STREAM_SESSION_ID_SZ],
 char session_hex[REDP2P_STREAM_SESSION_ID_SZ * 2 + 1],
 int *skip_iteration)
 {
-    redp2p_candidate_t candidates[REDP2P_CANDIDATES_MAX];
-    redp2p_candidate_t remote_candidates[REDP2P_CANDIDATES_MAX];
+    redp2p_candidate_t candidates[REDP2P_PEER_CANDIDATES_MAX];
     struct sockaddr_storage peer_addr;
-    redp2p_fd_t control_fd;
     redp2p_fd_t peer_fd;
     int candidate_count;
-    int control_result;
-    int remote_candidate_count;
     int result;
     size_t random_size;
     size_t hex_size;
@@ -7436,16 +7252,12 @@ int *skip_iteration)
     memset(session_bin, 0, REDP2P_STREAM_SESSION_ID_SZ);
     memset(session_hex, 0, REDP2P_STREAM_SESSION_ID_SZ * 2 + 1);
     if (skip_iteration) *skip_iteration = 0;
-    control_fd = redp2p_control_connect(runtime->ctx, "connect",
-        runtime->index_host, runtime->index_port, &control_result);
-    if (REDP2P_ISERR(control_fd)) return control_result;
 
     if (is_tcp) {
         if (!redp2p_stream_make_session_id(session_bin, session_hex)) {
             if (skip_iteration) *skip_iteration = 1;
             crypto_wipe(session_bin, REDP2P_STREAM_SESSION_ID_SZ);
             crypto_wipe(session_hex, REDP2P_STREAM_SESSION_ID_SZ * 2 + 1);
-            REDP2P_FD_CLOSE(control_fd);
             return REDP2P_ENET;
         }
     } else {
@@ -7457,7 +7269,6 @@ int *skip_iteration)
             if (skip_iteration) *skip_iteration = 1;
             crypto_wipe(session_bin, REDP2P_STREAM_SESSION_ID_SZ);
             crypto_wipe(session_hex, REDP2P_STREAM_SESSION_ID_SZ * 2 + 1);
-            REDP2P_FD_CLOSE(control_fd);
             return REDP2P_ENET;
         }
     }
@@ -7466,21 +7277,16 @@ int *skip_iteration)
     candidate_count = 0;
     if (REDP2P_ISERR(peer_fd) ||
         redp2p_gather_candidates(runtime->ctx, peer_fd, candidates,
-            REDP2P_CANDIDATES_MAX, &candidate_count) != REDP2P_OK)
+            REDP2P_PEER_CANDIDATES_MAX, &candidate_count) != REDP2P_OK)
     {
         if (skip_iteration) *skip_iteration = 1;
         crypto_wipe(session_bin, REDP2P_STREAM_SESSION_ID_SZ);
         crypto_wipe(session_hex, REDP2P_STREAM_SESSION_ID_SZ * 2 + 1);
         if (!REDP2P_ISERR(peer_fd)) REDP2P_FD_CLOSE(peer_fd);
-        REDP2P_FD_CLOSE(control_fd);
         return REDP2P_ENET;
     }
-    remote_candidate_count = 0;
-    result = redp2p_send_punch_req_cands(runtime->ctx, control_fd,
-        runtime->self_id, runtime->target_id, session_hex,
-        candidates, candidate_count, remote_candidates,
-        &remote_candidate_count);
-    REDP2P_FD_CLOSE(control_fd);
+    result = redp2p_send_punch_req_cands(runtime, session_hex, candidates,
+        candidate_count);
     if (result != REDP2P_OK) {
         if (skip_iteration) *skip_iteration = 1;
         crypto_wipe(session_bin, REDP2P_STREAM_SESSION_ID_SZ);
@@ -7493,7 +7299,7 @@ int *skip_iteration)
     result = redp2p_punch_select(runtime->ctx, runtime->ctx->sweep,
         (int)peer_fd,
         session_hex, runtime->self_id, runtime->target_id,
-        remote_candidates, remote_candidate_count, &peer_addr);
+        runtime->peer_candidates, runtime->n_peer_candidates, &peer_addr);
     if (result != REDP2P_OK) {
         fprintf(stderr, "redp2p: udp punch failed\n");
         REDP2P_FD_CLOSE((int)peer_fd);
@@ -7655,59 +7461,48 @@ int *should_run)
 }
 
 /**
- * Confirms that the target publisher exists before serving local clients.
+ * Resolves the target publisher and stores its candidates.
  * @param runtime Initialized consumer runtime.
  * @return REDP2P_OK on success, or the existing lookup error code.
  */
 static int redp2p_consumer_initial_lookup(redp2p_consumer_runtime_t *runtime) {
-    char recv_buf[REDP2P_BUF];
-    redp2p_fd_t control_fd;
-    int control_result;
-    int line_result;
+    redp2p_t *ctx;
+    JSON_Value *request;
+    JSON_Value *response;
+    JSON_Object *obj;
+    JSON_Object *out;
+    int result;
 
-    control_fd = redp2p_control_connect(runtime->ctx, "connect",
-        runtime->index_host, runtime->index_port, &control_result);
-    if (REDP2P_ISERR(control_fd)) return control_result;
-    snprintf(recv_buf, sizeof(recv_buf), "%s%s", REDP2P_CTRTOK_LOOKUP,
-        runtime->target_id);
-    line_result = redp2p_tcp_send(control_fd, recv_buf);
-    if (line_result == REDP2P_OK) {
-        line_result = redp2p_tcp_readline(control_fd, recv_buf,
-            (int)sizeof(recv_buf), 5);
+    ctx = runtime->ctx;
+    request = json_value_init_object();
+    if (!request) {
+        redp2p_set_error(ctx, "connect: lookup request allocation failed");
+        return REDP2P_ERROR;
     }
-    if (line_result < 0) {
-        REDP2P_FD_CLOSE(control_fd);
-        if (line_result == -1) {
-            redp2p_set_error(runtime->ctx,
-                "connect: lookup response timed out");
-            return REDP2P_ETIMEOUT;
-        }
-        if (line_result == -3 || line_result == -4) {
-            redp2p_set_error(runtime->ctx,
-                "connect: malformed lookup response line");
-            return REDP2P_EPROTO;
-        }
-        redp2p_set_error(runtime->ctx, "connect: lookup transport failed");
-        return REDP2P_ENET;
+    obj = json_value_get_object(request);
+    json_object_set_string(obj, "op", "lookup");
+    json_object_set_string(obj, "id", runtime->target_id);
+    response = NULL;
+    result = redp2p_http_client(ctx, "connect", runtime->index_host,
+        runtime->index_port, request, &response);
+    json_value_free(request);
+    if (result != REDP2P_OK) {
+        if (result == REDP2P_ENOENT)
+            redp2p_set_error(ctx, "connect: target publisher not found");
+        return result;
     }
-    if (strcmp(recv_buf, REDP2P_CTRTOK_NOT_FOUND) == 0) {
-        redp2p_set_error(runtime->ctx, "connect: target publisher not found");
-        REDP2P_FD_CLOSE(control_fd);
-        return REDP2P_ENOENT;
-    }
-    if (strcmp(recv_buf, REDP2P_CTRTOK_PUBLISHER) == 0 ||
-        strncmp(recv_buf, REDP2P_CTRTOK_PUBLISHER,
-            strlen(REDP2P_CTRTOK_PUBLISHER)) != 0 ||
-        strcmp(recv_buf + strlen(REDP2P_CTRTOK_PUBLISHER),
-            runtime->target_id) != 0)
+    out = json_value_get_object(response);
+    runtime->n_peer_candidates = 0;
+    if (!out ||
+        !redp2p_index_parse_candidates(out, "candidates",
+            runtime->peer_candidates, &runtime->n_peer_candidates))
     {
-        redp2p_set_error(runtime->ctx, "connect: malformed lookup response: %s",
-            recv_buf);
-        REDP2P_FD_CLOSE(control_fd);
+        json_value_free(response);
+        redp2p_set_error(ctx, "connect: malformed lookup response");
         return REDP2P_EPROTO;
     }
-    REDP2P_FD_CLOSE(control_fd);
-    redp2p_set_error(runtime->ctx, NULL);
+    json_value_free(response);
+    redp2p_set_error(ctx, NULL);
     return REDP2P_OK;
 }
 

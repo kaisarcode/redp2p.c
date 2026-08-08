@@ -36,16 +36,16 @@ The project is not designed as an enterprise networking platform, managed connec
 
 REDP2P separates coordination from application transport.
 
-The index is a TCP-only control service.
+The index exposes an HTTP control API. Each operation is one bounded HTTP POST with a JSON body carrying an `op` field; the index dispatches on `op`, keeps no open channel with peers, and closes each connection after one request. Peer lifetime is tied to a `last_seen` timestamp and the TTL, not to a connection. The index holds only temporary publisher records and short-lived pending punch calls; it stores no per-peer connection state and no proof-of-work challenge state. Any language that can serve HTTP can replicate the contract.
 
 It handles:
 
-* publisher registration
-* deregistration
-* publisher lookup
-* publisher listing
+* publisher registration and deregistration
+* publisher lookup and listing
+* publisher heartbeats (key-only refresh of `last_seen` and endpoint fields)
+* proof-of-work challenges (stateless, verified by recomputation)
 * candidate exchange
-* punch coordination
+* request-driven punch coordination (`punch_req` / `punch_poll`)
 * temporary registration state
 
 The index does not:
@@ -53,6 +53,7 @@ The index does not:
 * bind UDP for peer traffic
 * relay application payloads
 * inspect application protocols
+* keep an open channel with publishers
 * provide application authentication
 * provide consumer identity
 * provide global accounts
@@ -60,6 +61,23 @@ The index does not:
 * act as a control plane for managed clients
 
 Application traffic travels directly between peers through UDP.
+
+### Index contract
+
+The HTTP contract is a single endpoint dispatching on `op`:
+
+* `challenge` issues a random nonce and a difficulty; the server stores nothing.
+* `register` validates the id, optional password, and proof of work, enforces seats/VIP capacity, and upserts a publisher record with a deregistration key.
+* `heartbeat` authenticates with the deregistration key only (no proof of work) and refreshes `last_seen` and the endpoint fields.
+* `lookup` and `list` return fresh records, filtering expired ones without writing.
+* `deregister` removes a record only when the stored key matches.
+* `prune` physically removes expired records; it is meant for cron or an internal timer.
+* `punch_req` stores a bounded pending call for a target publisher id.
+* `punch_poll` returns and consumes the pending calls addressed to a publisher.
+
+Proof of work is paid at registration events only; heartbeats never carry nonce, solution, or proof. A quiet publisher becomes an expired record, not a disconnection event, and must `register` again after expiry.
+
+A publisher registers with `challenge` + `register`, stores the deregistration key locally, heartbeats over HTTP, and polls `punch_poll` at roughly 500 ms cadence while idle. A consumer looks the publisher up, announces itself with `punch_req`, and punches directly against the publisher candidates. The registration key is minted once and stays stable across re-registration and heartbeats, so re-registration never orphans the local key file.
 
 ## Transport Modes
 
@@ -120,7 +138,7 @@ STUN is used only to discover an externally visible endpoint. It does not carry 
 
 REDP2P does not implement TURN or any equivalent application traffic relay.
 
-The current control protocol accepts only `host`, `lan`, `public`, and `srflx` candidate records. It validates literal IPv4 or IPv6 addresses, removes duplicate endpoints, recomputes local priority, and attempts candidates in deterministic priority order. The implementation does not currently generate `public`, peer-reflexive, predicted, or proxy candidate records.
+The index contract accepts only `host`, `lan`, `public`, and `srflx` candidate records. It validates literal IPv4 or IPv6 addresses, removes duplicate endpoints, recomputes local priority, and attempts candidates in deterministic priority order. The implementation does not currently generate `public`, peer-reflexive, predicted, or proxy candidate records.
 
 When enabled, the bounded sweep probes neighboring IPv4 ports only around received `public` or `srflx` candidates. It is a direct-punch fallback, not a candidate service or relay.
 
@@ -146,7 +164,7 @@ Protocols such as SSH, HTTPS, TLS-enabled services, or application-specific secu
 
 Plaintext application protocols may also be transported when the operator deliberately accepts that model.
 
-The index control protocol is not an application payload security layer.
+The index HTTP control API is not an application payload security layer.
 
 `REDP2P_PASS`, `REDP2P_VIP`, and proof-of-work protect publisher registration and index capacity. They do not authenticate consumers, establish peer identity, or encrypt transported payloads.
 
@@ -175,7 +193,7 @@ It must not expand into:
 
 Index state is temporary.
 
-The index stores only the state required to coordinate active publishers and pending sessions.
+The index stores only the state required to coordinate active publishers and pending punch calls.
 
 It must not become a permanent source of truth.
 
@@ -185,7 +203,7 @@ The key authorizes `del` for one registration scope. It is not user identity, pe
 
 The design should prefer:
 
-* explicit bounds for protocol fields, candidates, pending punches, and proof challenges
+* explicit bounds for protocol fields, candidates, and pending punches
 * checked dynamic storage for active runtime state
 * explicit timeouts
 * automatic stale-state removal
@@ -227,7 +245,7 @@ The project must remain suitable for modest systems.
 Design choices should prefer:
 
 * bounded protocol fields and datagrams
-* bounded candidate, pending-punch, and proof-challenge tables
+* bounded candidate and pending-punch tables
 * checked dynamic publisher storage with optional operator-configured capacity
 * bounded candidate lists
 * bounded port sweeps
@@ -238,7 +256,7 @@ Design choices should prefer:
 
 Publisher storage grows dynamically as publishers become active. When `--seats` or `REDP2P_SEATS` is configured, seats is the total publisher capacity. Each VIP reservation occupies one seat even while inactive, and non-VIP publishers use the remaining seats. Without either setting, no application-level publisher limit applies. Removing an active publisher releases its occupancy, while a VIP reservation remains reserved for that VIP.
 
-Active publisher and consumer session arrays and index control-connection storage grow with live descriptors and are constrained by `select()` representation rather than one fixed session count. They do not retain completed work. Unbounded queues, hidden history, and infrastructure-dependent behavior should be rejected.
+Active publisher and consumer session arrays and index request-connection storage grow with live descriptors and are constrained by `select()` representation rather than one fixed session count. Index connections are short-lived, one HTTP request per connection, and are not retained. They do not retain completed work. Unbounded queues, hidden history, and infrastructure-dependent behavior should be rejected.
 
 ## Inspectability
 

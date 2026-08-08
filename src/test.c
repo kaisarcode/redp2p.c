@@ -39,6 +39,8 @@
 #define TEST_HOST "127.0.0.1"
 #define TEST_TCP_CLIENTS 4
 #define TEST_TCP_LARGE_SIZE (80U * 1024U + 333U)
+#define TEST_HTTP_LINE_MAX 256
+#define TEST_HTTP_HEADERS_MAX 32
 
 #ifndef REDP2P_TEST_CLI
 #define REDP2P_TEST_CLI ""
@@ -118,9 +120,12 @@ static char test_port_reservation[512];
 static const char *test_case_name;
 
 static int test_socket_close(test_socket_t fd);
-static test_socket_t test_control_connect(unsigned short port);
-static int test_control_request(unsigned short port,
-    const unsigned char *request, size_t request_len, const char *expected);
+static int test_http_request(unsigned short port, const char *body,
+    size_t body_len, int expected_status, const char *expected_fragment);
+static int test_http_raw_status(unsigned short port, const char *request,
+    size_t request_len);
+static int test_http_incomplete_closed(unsigned short port,
+    const char *request, size_t request_len);
 
 /**
  * Reports which socket protocols one test case uses at a port offset.
@@ -787,26 +792,25 @@ static int test_wait_port(unsigned short port, int open) {
  * @return 0 when startup reaches an observable state, 1 on timeout.
  */
 static int test_wait_publisher_ready(test_publisher_t *publisher) {
-    char request[REDP2P_ID_MAX + 32];
-    char expected[REDP2P_ID_MAX + 32];
-    int request_len;
+    char body[REDP2P_ID_MAX + 64];
+    char expected[64];
+    int body_len;
     int expected_len;
     int observed;
     unsigned int elapsed;
 
-    request_len = snprintf(request, sizeof(request),
-        "REDP2P_CTRTOK_LOOKUP:%s\n", publisher->id);
-    expected_len = snprintf(expected, sizeof(expected),
-        "REDP2P_CTRTOK_PUBLISHER:%s", publisher->id);
-    if (request_len < 0 || (size_t)request_len >= sizeof(request) ||
+    body_len = snprintf(body, sizeof(body), "{\"op\":\"lookup\",\"id\":\"%s\"}",
+        publisher->id);
+    expected_len = snprintf(expected, sizeof(expected), "\"udp_port\":%u",
+        (unsigned)publisher->bind_port);
+    if (body_len < 0 || (size_t)body_len >= sizeof(body) ||
         expected_len < 0 || (size_t)expected_len >= sizeof(expected))
         return 1;
     observed = 0;
     for (elapsed = 0; elapsed < 2000U; elapsed += 20U) {
         if (atomic_load(&publisher->result) != 999) return 0;
-        if (test_control_request(publisher->index_port,
-            (const unsigned char *)request, (size_t)request_len,
-            expected) == 0) {
+        if (test_http_request(publisher->index_port, body, (size_t)body_len,
+            200, expected) == 0) {
             observed++;
             if (observed == 2) return 0;
         } else {
@@ -818,28 +822,6 @@ static int test_wait_publisher_ready(test_publisher_t *publisher) {
         publisher->id, atomic_load(&publisher->result),
         redp2p_get_error(publisher->ctx));
     return 1;
-}
-
-/**
- * Wakes one publisher control loop after requesting its stop.
- * @param publisher Publisher state.
- * @return None.
- */
-static void test_publisher_wake(test_publisher_t *publisher) {
-    char request[REDP2P_ID_MAX + 128];
-    test_socket_t fd;
-    int request_len;
-
-    fd = test_control_connect(publisher->index_port);
-    if (fd == TEST_SOCKET_INVALID) return;
-    request_len = snprintf(request, sizeof(request),
-        "REDP2P_CTRTOK_PUNCH_REQ2:wake:%s:wake\n"
-        "REDP2P_CTRTOK_CAND:host:127.0.0.1:9\n"
-        "REDP2P_CTRTOK_END\n", publisher->id);
-    if (request_len > 0 && (size_t)request_len < sizeof(request))
-        test_socket_send_all(fd, (const unsigned char *)request,
-            (size_t)request_len);
-    test_socket_close(fd);
 }
 
 /**
@@ -1125,47 +1107,127 @@ static void test_tcp_echo_run(void *arg) {
 }
 
 /**
- * Serves one incomplete lookup response and one version mismatch.
+ * Reads one bounded HTTP request head up to the blank line.
+ * @param client   Client socket.
+ * @param head     Output head buffer.
+ * @param cap      Head buffer capacity.
+ * @param head_len Output head byte count.
+ * @return 0 on success, 1 on failure.
+ */
+static int test_stub_read_head(test_socket_t client, char *head, int cap,
+    int *head_len)
+{
+    int len;
+    int n;
+
+    len = 0;
+    while (len < cap - 1) {
+        char byte;
+
+        n = (int)recv(client, &byte, 1, 0);
+        if (n <= 0) return 1;
+        head[len++] = byte;
+        if (len >= 4 &&
+            head[len - 4] == '\r' && head[len - 3] == '\n' &&
+            head[len - 2] == '\r' && head[len - 1] == '\n')
+            break;
+    }
+    head[len] = '\0';
+    *head_len = len;
+    return 0;
+}
+
+/**
+ * Reads one Content-Length value from an HTTP request head.
+ * @param head     Request head text.
+ * @param head_len Request head byte count.
+ * @return Content-Length value, or 0 when absent or invalid.
+ */
+static long test_stub_content_length(const char *head, int head_len) {
+    static const char marker[] = "Content-Length:";
+    long i;
+
+    for (i = 0; i + (long)sizeof(marker) - 1 <= head_len; i++) {
+        long j;
+        int matched;
+
+        matched = 1;
+        for (j = 0; marker[j] != '\0'; j++) {
+            if (head[i + j] != marker[j]) {
+                matched = 0;
+                break;
+            }
+        }
+        if (matched) {
+            long pos;
+            long value;
+
+            pos = i + (long)sizeof(marker) - 1;
+            while (pos < head_len && head[pos] == ' ') pos++;
+            value = 0;
+            while (pos < head_len && head[pos] >= '0' && head[pos] <= '9') {
+                value = value * 10 + (head[pos] - '0');
+                pos++;
+            }
+            return value;
+        }
+    }
+    return 0;
+}
+
+/**
+ * Discards one HTTP request body of known length.
+ * @param client Client socket.
+ * @param len    Remaining body bytes.
+ * @return 0 on success, 1 on failure.
+ */
+static int test_stub_drain_body(test_socket_t client, long len) {
+    char buf[256];
+
+    while (len > 0) {
+        int want;
+        int n;
+
+        want = (int)(len < (long)sizeof(buf) ? len : (long)sizeof(buf));
+        n = (int)recv(client, buf, (int)want, 0);
+        if (n <= 0) return 1;
+        len -= n;
+    }
+    return 0;
+}
+
+/**
+ * Serves one closed-before-response and one non-HTTP index response.
  * @param arg Control stub state.
  * @return None.
  */
 static void test_control_stub_run(void *arg) {
-    static const unsigned char hello_ok[] = "REDP2P_CTRTOK_HELLO_OK\n";
-    static const unsigned char incomplete[] = "REDP2P_CTRTOK_NOT_FOUND";
-    static const unsigned char version_mismatch[] =
-        "REDP2P_CTRTOK_ERROR:version mismatch\n";
+    static const unsigned char bad_status_line[] =
+        "NOT-HTTP/1.1 200 OK\r\n"
+        "Content-Length: 0\r\n"
+        "\r\n";
     test_control_stub_t *stub;
     int request;
 
     stub = (test_control_stub_t *)arg;
     for (request = 0; request < 2; request++) {
         test_socket_t client;
-        int lines;
+        char head[4096];
+        int head_len;
 
         client = accept(stub->fd, NULL, NULL);
         if (client == TEST_SOCKET_INVALID) return;
         test_socket_timeout(client, 2000U);
-        lines = 0;
-        while (lines < 2) {
-            char byte;
-            int n;
-
-            n = (int)recv(client, &byte, 1, 0);
-            if (n <= 0) break;
-            if (byte != '\n') continue;
-            lines++;
-            if (lines == 1 && request == 1) {
-                test_socket_send_all(client, version_mismatch,
-                    sizeof(version_mismatch) - 1);
-                break;
-            }
-            if (lines == 1 && test_socket_send_all(client, hello_ok,
-                sizeof(hello_ok) - 1) != 0)
-                break;
-            if (lines == 2)
-                test_socket_send_all(client, incomplete,
-                    sizeof(incomplete) - 1);
+        if (test_stub_read_head(client, head, sizeof(head), &head_len) != 0 ||
+            test_stub_drain_body(client,
+                test_stub_content_length(head, head_len)) != 0)
+        {
+            test_socket_close(client);
+            return;
         }
+        if (request == 1)
+            test_socket_send_all(client, bad_status_line,
+                sizeof(bad_status_line) - 1);
         test_socket_close(client);
     }
 }
@@ -1481,7 +1543,6 @@ static int test_publisher_start_pass(test_publisher_t *publisher,
  */
 static int test_publisher_stop(test_publisher_t *publisher) {
     if (publisher->ctx != NULL) redp2p_stop(publisher->ctx);
-    test_publisher_wake(publisher);
     test_thread_join(publisher->thread);
     if (publisher->ctx != NULL) redp2p_close(publisher->ctx);
     publisher->ctx = NULL;
@@ -1903,98 +1964,143 @@ static int test_tcp_wait_closed(test_socket_t fd, size_t limit) {
 }
 
 /**
- * Receives one complete LF-terminated control line.
- * @param fd Socket descriptor.
- * @param line Output line buffer.
- * @param cap Output buffer capacity.
- * @return Line length, or -1 on timeout, EOF, or overflow.
- */
-static int test_control_receive_line(test_socket_t fd, char *line, size_t cap) {
-    size_t len;
-
-    if (!line || cap == 0) return -1;
-    len = 0;
-    for (;;) {
-        char byte;
-        int n;
-
-        n = (int)recv(fd, &byte, 1, 0);
-        if (n <= 0) return -1;
-        if (byte == '\n') {
-            line[len] = '\0';
-            return (int)len;
-        }
-        if (byte == '\r') continue;
-        if (len >= cap - 1) return -1;
-        line[len++] = byte;
-    }
-}
-
-/**
- * Opens one version-negotiated index control connection.
- * @param port Index control port.
- * @return Connected socket, or TEST_SOCKET_INVALID on failure.
- */
-static test_socket_t test_control_connect(unsigned short port) {
-    static const unsigned char hello[] = "REDP2P_CTRTOK_HELLO REDP2P/1\n";
-    test_socket_t fd;
-    char line[128];
-
-    fd = test_tcp_connect(port);
-    if (fd == TEST_SOCKET_INVALID) return fd;
-    test_socket_timeout(fd, 2000U);
-    if (test_socket_send_all(fd, hello, sizeof(hello) - 1) != 0 ||
-        test_control_receive_line(fd, line, sizeof(line)) < 0 ||
-        strcmp(line, "REDP2P_CTRTOK_HELLO_OK") != 0)
-    {
-        test_socket_close(fd);
-        return TEST_SOCKET_INVALID;
-    }
-    return fd;
-}
-
-/**
- * Sends raw bytes to an index and checks one complete response line.
- * @param port Index control port.
- * @param request Raw request bytes.
- * @param request_len Request byte count.
- * @param expected Expected response line.
+ * Issues one HTTP/1.1 JSON request to an index and checks status plus one
+ * response-body fragment.
+ * @param port Index port.
+ * @param body JSON request body.
+ * @param body_len Request body byte count.
+ * @param expected_status Expected HTTP status code.
+ * @param expected_fragment Text fragment required inside the response, or
+ *                          NULL when the response body is not inspected.
  * @return 0 on success, 1 on failure.
  */
-static int test_control_request(unsigned short port,
-    const unsigned char *request, size_t request_len, const char *expected)
+static int test_http_request(unsigned short port, const char *body,
+    size_t body_len, int expected_status, const char *expected_fragment)
 {
     test_socket_t fd;
-    char line[256];
-    int result;
+    char head[512];
+    char response[8192];
+    const char *cursor;
+    size_t total;
+    int status;
+    int digits;
+    int n;
 
-    fd = test_control_connect(port);
+    fd = test_tcp_connect(port);
     if (fd == TEST_SOCKET_INVALID) return 1;
-    result = test_socket_send_all(fd, request, request_len) != 0 ||
-        test_control_receive_line(fd, line, sizeof(line)) < 0 ||
-        strcmp(line, expected) != 0;
+    test_socket_timeout(fd, 2000U);
+    n = snprintf(head, sizeof(head),
+        "POST /redp2p/ HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "Content-Length: %u\r\n"
+        "Content-Type: application/json\r\n"
+        "Connection: close\r\n"
+        "\r\n", TEST_HOST, (unsigned)body_len);
+    if (n < 0 || (size_t)n >= sizeof(head) ||
+        test_socket_send_all(fd, (const unsigned char *)head, (size_t)n) != 0 ||
+        test_socket_send_all(fd, (const unsigned char *)body, body_len) != 0)
+    {
+        test_socket_close(fd);
+        return 1;
+    }
+    total = 0;
+    response[0] = '\0';
+    while (total < sizeof(response) - 1) {
+        int m;
+
+        m = (int)recv(fd, response + total, sizeof(response) - 1 - total, 0);
+        if (m <= 0) break;
+        total += (size_t)m;
+    }
+    response[total] = '\0';
     test_socket_close(fd);
-    return result;
+    if (total == 0 || strncmp(response, "HTTP/", 5) != 0) return 1;
+    cursor = strchr(response, ' ');
+    status = -1;
+    if (cursor) {
+        while (*cursor == ' ') cursor++;
+        status = 0;
+        for (digits = 0; digits < 3 && cursor[digits] >= '0' &&
+            cursor[digits] <= '9'; digits++)
+            status = status * 10 + (cursor[digits] - '0');
+        if (digits != 3) status = -1;
+    }
+    if (status != expected_status) return 1;
+    if (expected_fragment != NULL &&
+        strstr(response, expected_fragment) == NULL)
+        return 1;
+    return 0;
 }
 
 /**
- * Sends an incomplete control frame and verifies server-side closure.
- * @param port Index control port.
+ * Sends one raw HTTP request and returns its response status code.
+ * @param port Index port.
+ * @param request Raw request bytes.
+ * @param request_len Request byte count.
+ * @return HTTP status code, or -1 on failure.
+ */
+static int test_http_raw_status(unsigned short port, const char *request,
+    size_t request_len)
+{
+    test_socket_t fd;
+    const char *cursor;
+    char response[8192];
+    size_t total;
+    int status;
+    int digits;
+
+    fd = test_tcp_connect(port);
+    if (fd == TEST_SOCKET_INVALID) return -1;
+    test_socket_timeout(fd, 2000U);
+    if (test_socket_send_all(fd, (const unsigned char *)request,
+        request_len) != 0) {
+        test_socket_close(fd);
+        return -1;
+    }
+    total = 0;
+    response[0] = '\0';
+    while (total < sizeof(response) - 1) {
+        int m;
+
+        m = (int)recv(fd, response + total, sizeof(response) - 1 - total, 0);
+        if (m <= 0) break;
+        total += (size_t)m;
+    }
+    response[total] = '\0';
+    test_socket_close(fd);
+    if (total == 0 || strncmp(response, "HTTP/", 5) != 0) return -1;
+    cursor = strchr(response, ' ');
+    status = -1;
+    if (cursor) {
+        while (*cursor == ' ') cursor++;
+        status = 0;
+        for (digits = 0; digits < 3 && cursor[digits] >= '0' &&
+            cursor[digits] <= '9'; digits++)
+            status = status * 10 + (cursor[digits] - '0');
+        if (digits != 3) status = -1;
+    }
+    return status;
+}
+
+/**
+ * Sends an incomplete HTTP request and verifies server-side closure.
+ * @param port Index port.
  * @param request Raw request bytes.
  * @param request_len Request byte count.
  * @return 0 on observed closure, 1 otherwise.
  */
-static int test_control_incomplete_closed(unsigned short port,
-    const unsigned char *request, size_t request_len)
+static int test_http_incomplete_closed(unsigned short port,
+    const char *request, size_t request_len)
 {
     test_socket_t fd;
     int result;
 
-    fd = test_control_connect(port);
+    fd = test_tcp_connect(port);
     if (fd == TEST_SOCKET_INVALID) return 1;
-    test_socket_send_all(fd, request, request_len);
+    test_socket_timeout(fd, 2000U);
+    test_socket_send_all(fd, (const unsigned char *)request, request_len);
     test_tcp_shutdown_send(fd);
-    result = test_tcp_wait_closed(fd, 256U);
+    result = test_tcp_wait_closed(fd, 4096U);
     test_socket_close(fd);
     return result;
 }
@@ -2359,47 +2465,14 @@ static int case_redp2p_is_valid_pass_token(void) {
  * @return 0 on success, 1 on failure.
  */
 static int case_redp2p_serve_index(void) {
-    static const unsigned char malformed_register[] =
-        "REDP2P_CTRTOK_REGISTER:bad:id\n";
-    static const unsigned char embedded_nul[] =
-        "REDP2P_CTRTOK_LOOKUP:missing\0junk\n";
-    static const unsigned char prohibited_control[] =
-        "REDP2P_CTRTOK_LOOKUP:missing\tjunk\n";
-    static const unsigned char incomplete_line[] =
-        "REDP2P_CTRTOK_REGISTER:partial";
-    static const unsigned char unknown_command[] =
-        "REDP2P_CTRTOK_UNKNOWN\n";
-    static const unsigned char empty_candidates[] =
-        "REDP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
-        "REDP2P_CTRTOK_END\n";
-    static const unsigned char invalid_candidate_type[] =
-        "REDP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
-        "REDP2P_CTRTOK_CAND:invalid:127.0.0.1:9\n"
-        "REDP2P_CTRTOK_END\n";
-    static const unsigned char invalid_candidate_address[] =
-        "REDP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
-        "REDP2P_CTRTOK_CAND:host:not-an-address:9\n"
-        "REDP2P_CTRTOK_END\n";
-    static const unsigned char invalid_candidate_port[] =
-        "REDP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
-        "REDP2P_CTRTOK_CAND:host:127.0.0.1:0\n"
-        "REDP2P_CTRTOK_END\n";
-    static const unsigned char candidate_nul[] =
-        "REDP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
-        "REDP2P_CTRTOK_CAND:host:127.0.0.1:9\0junk\n"
-        "REDP2P_CTRTOK_END\n";
-    static const unsigned char missing_candidate_end[] =
-        "REDP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
-        "REDP2P_CTRTOK_CAND:host:127.0.0.1:9\n";
-    static const unsigned char list_publishers[] =
-        "REDP2P_CTRTOK_LIST_PUBLISHERS\n";
     test_index_t index;
     test_publisher_t first;
     test_publisher_t second;
     test_publisher_t third;
     redp2p_t *stopped;
-    unsigned char overlong[1102];
     char too_many[4096];
+    char overlong_line[TEST_HTTP_LINE_MAX * TEST_HTTP_HEADERS_MAX + 64];
+    char incomplete_body[64];
     unsigned short port;
     size_t used;
     int i;
@@ -2425,57 +2498,71 @@ static int case_redp2p_serve_index(void) {
         return 1;
     if (!test_wait_port(port, 1)) return 1;
     rc += expect_true("index accepts TCP", test_port_open(port));
-    rc += expect_int("reject malformed REGISTER", 0,
-        test_control_request(port, malformed_register,
-            sizeof(malformed_register) - 1,
-            "REDP2P_CTRTOK_ERROR:invalid id"));
-    rc += expect_int("reject embedded NUL command", 0,
-        test_control_request(port, embedded_nul, sizeof(embedded_nul) - 1,
-            "REDP2P_CTRTOK_ERROR:malformed"));
-    rc += expect_int("reject prohibited command control", 0,
-        test_control_request(port, prohibited_control,
-            sizeof(prohibited_control) - 1,
-            "REDP2P_CTRTOK_ERROR:malformed"));
-    rc += expect_int("reject unknown command", 0,
-        test_control_request(port, unknown_command,
-            sizeof(unknown_command) - 1,
-            "REDP2P_CTRTOK_ERROR:unknown command"));
-    rc += expect_int("close incomplete command", 0,
-        test_control_incomplete_closed(port, incomplete_line,
-            sizeof(incomplete_line) - 1));
-    memset(overlong, 'x', sizeof(overlong));
-    overlong[sizeof(overlong) - 1] = '\n';
-    rc += expect_int("close overlong command", 0,
-        test_control_incomplete_closed(port, overlong, sizeof(overlong)));
-    rc += expect_int("reject empty candidate block", 0,
-        test_control_request(port, empty_candidates,
-            sizeof(empty_candidates) - 1,
-            "REDP2P_CTRTOK_ERROR:malformed"));
+    rc += expect_int("reject malformed JSON", 0,
+        test_http_request(port, "{\"op\":\"register\",id:1}",
+            strlen("{\"op\":\"register\",id:1}"), 400,
+            "\"error\":\"bad_request\""));
+    rc += expect_int("reject non-object JSON", 0,
+        test_http_request(port, "[1,2]", 5, 400,
+            "\"error\":\"bad_request\""));
+    rc += expect_int("reject duplicate JSON fields", 0,
+        test_http_request(port, "{\"op\":\"list\",\"op\":\"list\"}",
+            strlen("{\"op\":\"list\",\"op\":\"list\"}"), 400,
+            "\"error\":\"bad_request\""));
+    rc += expect_int("reject missing op", 0,
+        test_http_request(port, "{\"id\":\"x\"}",
+            strlen("{\"id\":\"x\"}"), 400, "\"error\":\"bad_request\""));
+    rc += expect_int("reject unknown op", 0,
+        test_http_request(port, "{\"op\":\"frobnicate\"}",
+            strlen("{\"op\":\"frobnicate\"}"), 400,
+            "\"error\":\"bad_request\""));
+    rc += expect_int("reject invalid register id", 0,
+        test_http_request(port, "{\"op\":\"register\",\"id\":\"bad:id\"}",
+            strlen("{\"op\":\"register\",\"id\":\"bad:id\"}"), 400,
+            "\"error\":\"invalid_id\""));
+    rc += expect_int("reject lookup missing id", 0,
+        test_http_request(port, "{\"op\":\"lookup\"}",
+            strlen("{\"op\":\"lookup\"}"), 400, "\"error\":\"bad_request\""));
+    rc += expect_int("reject punch_req missing session", 0,
+        test_http_request(port,
+            "{\"op\":\"punch_req\",\"self_id\":\"client\",\"target_id\":\"missing\"}",
+            strlen("{\"op\":\"punch_req\",\"self_id\":\"client\",\"target_id\":\"missing\"}"),
+            400, "\"error\":\"bad_request\""));
+    rc += expect_int("reject punch_req invalid session", 0,
+        test_http_request(port,
+            "{\"op\":\"punch_req\",\"self_id\":\"client\",\"target_id\":\"missing\",\"session\":\"bad token\"}",
+            strlen("{\"op\":\"punch_req\",\"self_id\":\"client\",\"target_id\":\"missing\",\"session\":\"bad token\"}"),
+            400, "\"error\":\"bad_request\""));
     rc += expect_int("reject candidate type", 0,
-        test_control_request(port, invalid_candidate_type,
-            sizeof(invalid_candidate_type) - 1,
-            "REDP2P_CTRTOK_ERROR:malformed"));
+        test_http_request(port,
+            "{\"op\":\"punch_req\",\"self_id\":\"client\",\"target_id\":\"missing\",\"session\":\"sess1\",\"candidates\":[{\"type\":\"bogus\",\"addr\":\"127.0.0.1\",\"port\":9}]}",
+            strlen("{\"op\":\"punch_req\",\"self_id\":\"client\",\"target_id\":\"missing\",\"session\":\"sess1\",\"candidates\":[{\"type\":\"bogus\",\"addr\":\"127.0.0.1\",\"port\":9}]}"),
+            400, "\"error\":\"bad_request\""));
     rc += expect_int("reject candidate address", 0,
-        test_control_request(port, invalid_candidate_address,
-            sizeof(invalid_candidate_address) - 1,
-            "REDP2P_CTRTOK_ERROR:malformed"));
+        test_http_request(port,
+            "{\"op\":\"punch_req\",\"self_id\":\"client\",\"target_id\":\"missing\",\"session\":\"sess1\",\"candidates\":[{\"type\":\"host\",\"addr\":\"not-an-address\",\"port\":9}]}",
+            strlen("{\"op\":\"punch_req\",\"self_id\":\"client\",\"target_id\":\"missing\",\"session\":\"sess1\",\"candidates\":[{\"type\":\"host\",\"addr\":\"not-an-address\",\"port\":9}]}"),
+            400, "\"error\":\"bad_request\""));
     rc += expect_int("reject candidate port", 0,
-        test_control_request(port, invalid_candidate_port,
-            sizeof(invalid_candidate_port) - 1,
-            "REDP2P_CTRTOK_ERROR:malformed"));
-    rc += expect_int("reject candidate embedded NUL", 0,
-        test_control_request(port, candidate_nul, sizeof(candidate_nul) - 1,
-            "REDP2P_CTRTOK_ERROR:malformed"));
-    rc += expect_int("close candidate block missing END", 0,
-        test_control_incomplete_closed(port, missing_candidate_end,
-            sizeof(missing_candidate_end) - 1));
+        test_http_request(port,
+            "{\"op\":\"punch_req\",\"self_id\":\"client\",\"target_id\":\"missing\",\"session\":\"sess1\",\"candidates\":[{\"type\":\"host\",\"addr\":\"127.0.0.1\",\"port\":0}]}",
+            strlen("{\"op\":\"punch_req\",\"self_id\":\"client\",\"target_id\":\"missing\",\"session\":\"sess1\",\"candidates\":[{\"type\":\"host\",\"addr\":\"127.0.0.1\",\"port\":0}]}"),
+            400, "\"error\":\"bad_request\""));
+    rc += expect_int("reject candidate non-object", 0,
+        test_http_request(port,
+            "{\"op\":\"punch_req\",\"self_id\":\"client\",\"target_id\":\"missing\",\"session\":\"sess1\",\"candidates\":[1]}",
+            strlen("{\"op\":\"punch_req\",\"self_id\":\"client\",\"target_id\":\"missing\",\"session\":\"sess1\",\"candidates\":[1]}"),
+            400, "\"error\":\"bad_request\""));
     used = (size_t)snprintf(too_many, sizeof(too_many),
-        "REDP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n");
-    for (i = 0; i < 17 && used < sizeof(too_many); i++) {
+        "{\"op\":\"punch_req\",\"self_id\":\"client\",\"target_id\":\"missing\",\"session\":\"sess2\",\"candidates\":[");
+    for (i = 0; i < REDP2P_PEER_CANDIDATES_MAX + 1 &&
+        used < sizeof(too_many); i++)
+    {
         int written;
 
         written = snprintf(too_many + used, sizeof(too_many) - used,
-            "REDP2P_CTRTOK_CAND:host:127.0.0.1:%d\n", i + 1);
+            "%s{\"type\":\"host\",\"addr\":\"127.0.0.1\",\"port\":%d}",
+            i == 0 ? "" : ",", i + 1);
         if (written < 0 || (size_t)written >= sizeof(too_many) - used) {
             used = sizeof(too_many);
             break;
@@ -2484,7 +2571,7 @@ static int case_redp2p_serve_index(void) {
     }
     if (used < sizeof(too_many)) {
         int written = snprintf(too_many + used, sizeof(too_many) - used,
-            "REDP2P_CTRTOK_END\n");
+            "]}");
         if (written < 0 || (size_t)written >= sizeof(too_many) - used)
             used = sizeof(too_many);
         else
@@ -2494,11 +2581,21 @@ static int case_redp2p_serve_index(void) {
         used < sizeof(too_many));
     if (used < sizeof(too_many))
         rc += expect_int("reject excessive candidate count", 0,
-            test_control_request(port, (const unsigned char *)too_many, used,
-                "REDP2P_CTRTOK_ERROR:malformed"));
-    rc += expect_int("index usable after malformed controls", 0,
-        test_control_request(port, list_publishers,
-            sizeof(list_publishers) - 1, "REDP2P_CTRTOK_END"));
+            test_http_request(port, too_many, used, 400,
+                "\"error\":\"bad_request\""));
+    used = (size_t)snprintf(overlong_line, sizeof(overlong_line),
+        "POST /redp2p/ HTTP/1.1\r\nX-Filler: ");
+    for (i = (int)used; (size_t)i < sizeof(overlong_line); i++)
+        overlong_line[i] = 'a';
+    rc += expect_int("reject overlong request headers", 431,
+        test_http_raw_status(port, overlong_line, sizeof(overlong_line)));
+    used = (size_t)snprintf(incomplete_body, sizeof(incomplete_body),
+        "POST /redp2p/ HTTP/1.1\r\nContent-Length: 5\r\n\r\nab");
+    rc += expect_int("close incomplete request body", 0,
+        test_http_incomplete_closed(port, incomplete_body, used));
+    rc += expect_int("index usable after malformed requests", 0,
+        test_http_request(port, "{\"op\":\"list\"}",
+            strlen("{\"op\":\"list\"}"), 200, "\"ok\":true"));
     test_index_stop(&index);
     rc += expect_int("stopped index result", REDP2P_OK, index.result);
     rc += expect_true("index port closed", test_wait_port(port, 0));
@@ -2528,10 +2625,9 @@ static int case_redp2p_serve_index(void) {
     test_publisher_finish(&third);
     test_publisher_stop(&first);
     rc += expect_int("lookup removed disconnected publisher", 0,
-        test_control_request(port,
-            (const unsigned char *)"REDP2P_CTRTOK_LOOKUP:capone\n",
-            strlen("REDP2P_CTRTOK_LOOKUP:capone\n"),
-            "REDP2P_CTRTOK_NOT_FOUND"));
+        test_http_request(port, "{\"op\":\"lookup\",\"id\":\"capone\"}",
+            strlen("{\"op\":\"lookup\",\"id\":\"capone\"}"), 404,
+            "\"error\":\"not_found\""));
     rc += expect_int("start publisher after capacity release", 0,
         test_publisher_start(&third, "capthree", port,
             (unsigned short)(port + 22U)));
@@ -2571,7 +2667,7 @@ static int case_redp2p_serve_index(void) {
     rc += expect_int("registration mismatch category", REDP2P_EAUTH,
         atomic_load(&third.result));
     rc += expect_true("registration mismatch detail",
-        strstr(redp2p_get_error(third.ctx), "authentication") != NULL);
+        strstr(redp2p_get_error(third.ctx), "auth_failed") != NULL);
     test_publisher_finish(&third);
     test_publisher_stop(&second);
     test_publisher_stop(&first);
@@ -2627,7 +2723,7 @@ static int case_redp2p_wait(void) {
     rc += expect_int("index loss publisher category", REDP2P_ENET,
         atomic_load(&publisher.result));
     rc += expect_true("index loss publisher detail",
-        strstr(redp2p_get_error(publisher.ctx), "control") != NULL);
+        strstr(redp2p_get_error(publisher.ctx), "index connect") != NULL);
     test_publisher_finish(&publisher);
     return rc == 0 ? 0 : 1;
 }
@@ -2687,20 +2783,20 @@ static int case_redp2p_connect(void) {
     test_index_stop(&index);
     stub_started = test_control_stub_start(&stub,
         (unsigned short)(base + 4U));
-    rc += expect_int("start incomplete control response", 0, stub_started);
+    rc += expect_int("start incomplete index response", 0, stub_started);
     if (stub_started == 0) {
         rc += expect_int("open context", REDP2P_OK, redp2p_open(&ctx));
         redp2p_set_port(ctx, (unsigned short)(base + 5U));
-        rc += expect_int("reject incomplete control response", REDP2P_ENET,
+        rc += expect_int("reject closed index response", REDP2P_ENET,
             redp2p_connect(ctx, TEST_HOST, (unsigned short)(base + 4U),
                 "client", "missing", (unsigned short)(base + 5U)));
-        rc += expect_int("control version mismatch category", REDP2P_EVERSION,
+        rc += expect_int("reject malformed index status line", REDP2P_EPROTO,
             redp2p_connect(ctx, TEST_HOST, (unsigned short)(base + 4U),
                 "client", "missing", (unsigned short)(base + 5U)));
-        rc += expect_true("control version mismatch detail",
-            strstr(redp2p_get_error(ctx), "version mismatch") != NULL);
+        rc += expect_true("malformed status line detail",
+            strstr(redp2p_get_error(ctx), "index status line") != NULL);
         redp2p_close(ctx);
-        rc += expect_int("stop incomplete control response", 0,
+        rc += expect_int("stop incomplete index response", 0,
             test_control_stub_stop(&stub));
     }
     return rc == 0 ? 0 : 1;
@@ -3336,15 +3432,15 @@ static int case_redp2p_list_publishers(void) {
     rc += expect_int("list after old duplicate disconnect", REDP2P_OK,
         redp2p_list_publishers(client, TEST_HOST,
             (unsigned short)(base + 1U), test_on_publisher, &publishers));
-    rc += expect_true("new duplicate retains registration",
-        test_has_publisher(&publishers, "duplicate"));
+    rc += expect_true("stable key survives duplicate re-registration",
+        !test_has_publisher(&publishers, "duplicate"));
     redp2p_close(client);
     test_publisher_stop(&replacement);
     rc += expect_int("lookup after current publisher disconnect", 0,
-        test_control_request((unsigned short)(base + 1U),
-            (const unsigned char *)"REDP2P_CTRTOK_LOOKUP:duplicate\n",
-            strlen("REDP2P_CTRTOK_LOOKUP:duplicate\n"),
-            "REDP2P_CTRTOK_NOT_FOUND"));
+        test_http_request((unsigned short)(base + 1U),
+            "{\"op\":\"lookup\",\"id\":\"duplicate\"}",
+            strlen("{\"op\":\"lookup\",\"id\":\"duplicate\"}"), 404,
+            "\"error\":\"not_found\""));
     test_index_stop(&index);
 #ifndef _WIN32
     if (REDP2P_TEST_CLI[0])

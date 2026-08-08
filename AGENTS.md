@@ -70,7 +70,7 @@ Do not invent a broader product roadmap.
 
 The following invariants must be preserved unless the project owner explicitly instructs otherwise:
 
-* the index uses TCP as a control channel
+* the index exposes an HTTP control API
 * the index does not relay application traffic
 * peer application traffic travels directly over UDP
 * TCP mode uses vendored KCP over the peer UDP path
@@ -228,7 +228,7 @@ Avoid:
 * modularization motivated only by line count
 * additional compilation units for tightly coupled implementation details
 
-Session and control-connection tables currently grow with active local work and are ultimately constrained by descriptors and `select()` representation rather than one fixed application-level session maximum. Do not claim every allocation has a strict static bound. Prefer explicit limits when changing these paths, and never add unbounded queues or retained history.
+Session and index request-connection tables currently grow with active local work and are ultimately constrained by descriptors and `select()` representation rather than one fixed application-level session maximum. Index connections are short-lived, one HTTP request per connection; publisher and consumer session arrays live only while the local peer is active. Do not claim every allocation has a strict static bound. Prefer explicit limits when changing these paths, and never add unbounded queues or retained history.
 
 Publisher storage grows dynamically. Without configured seats, it has no application-level publisher capacity limit. When seats is configured through `--seats`, `REDP2P_SEATS`, or `redp2p_set_seats()`, treat it as the total publisher capacity. Each VIP reservation occupies one seat even while inactive, and non-VIP publishers use the remainder. Zero accepts no publishers. Keep allocation arithmetic checked without presenting implementation safety checks as product capacity limits.
 
@@ -261,7 +261,7 @@ Organize the implementation using clear sections, concrete functions, explicit o
 
 Extend the existing files instead of creating new project source, header, or test files.
 
-Vendored KCP and Monocypher remain under `lib/`; they are external implementations and are the only intended exception to the four-file project source layout.
+Vendored KCP, Monocypher, and parson remain under `lib/`; they are external implementations and are the only intended exception to the four-file project source layout.
 
 A source-layout change is allowed only when the project owner explicitly requests that exact structural change. Do not infer permission from a request to clean up, simplify, reorganize, review, reduce complexity, or improve maintainability.
 

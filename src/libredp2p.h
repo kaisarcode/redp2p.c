@@ -41,6 +41,7 @@ typedef struct redp2p redp2p_t;
 #define REDP2P_KEY_STR_SZ      33
 #define REDP2P_PASS_MAX       255
 #define REDP2P_UDP_PAYLOAD_MAX 1412
+#define REDP2P_PEER_CANDIDATES_MAX  8
 
 #define REDP2P_PROTO_TCP 1
 #define REDP2P_PROTO_UDP 2
@@ -60,12 +61,6 @@ typedef struct redp2p_options {
     char stun_url[256];
 } redp2p_options_t;
 
-typedef struct {
-    char id[REDP2P_ID_MAX + 1];
-    char key[REDP2P_KEY_STR_SZ];
-    time_t last_seen;
-} redp2p_peer_t;
-
 /**
  * Candidate transport class.
  * Summary: Ranks direct candidates before public or observed candidates.
@@ -81,7 +76,7 @@ typedef enum {
 } redp2p_candidate_type_t;
 
 /**
- * Candidate endpoint exchanged through the TCP rendezvous control channel.
+ * Candidate endpoint exchanged through the coordination control channel.
  * Summary: The priority is local-only and is recomputed after parsing.
  */
 typedef struct {
@@ -90,6 +85,20 @@ typedef struct {
     unsigned short port;
     unsigned int priority;
 } redp2p_candidate_t;
+
+/**
+ * Index publisher record.
+ * Summary: Records live or die by TTL from last_seen, not connection lifetime.
+ */
+typedef struct {
+    char id[REDP2P_ID_MAX + 1];
+    char key[REDP2P_KEY_STR_SZ];
+    time_t last_seen;
+    int proto;
+    unsigned short udp_port;
+    redp2p_candidate_t candidates[REDP2P_PEER_CANDIDATES_MAX];
+    int n_candidates;
+} redp2p_peer_t;
 
 /**
  * Publisher listing callback.

@@ -32,6 +32,7 @@ set(REDP2P_SOURCES
     src/libredp2p.c
     lib/monocypher/monocypher.c
     lib/kcp/ikcp.c
+    lib/parson/parson.c
 )
 
 set_source_files_properties(src/libredp2p.c PROPERTIES
@@ -41,12 +42,12 @@ set_source_files_properties(src/libredp2p.c PROPERTIES
 if(NOT REDP2P_TEST_EXTERNAL_ARTIFACTS)
     add_library(redp2p_shared SHARED ${REDP2P_SOURCES})
     set_target_properties(redp2p_shared PROPERTIES OUTPUT_NAME "redp2p")
-    target_include_directories(redp2p_shared PRIVATE src lib/monocypher lib/kcp)
+    target_include_directories(redp2p_shared PRIVATE src lib/monocypher lib/kcp lib/parson)
 
     # Static library
     add_library(redp2p_static STATIC ${REDP2P_SOURCES})
     set_target_properties(redp2p_static PROPERTIES OUTPUT_NAME "redp2p")
-    target_include_directories(redp2p_static PRIVATE src lib/monocypher lib/kcp)
+    target_include_directories(redp2p_static PRIVATE src lib/monocypher lib/kcp lib/parson)
 
     # Binary: redp2p
     if(APPLE)
@@ -55,7 +56,7 @@ if(NOT REDP2P_TEST_EXTERNAL_ARTIFACTS)
         add_executable(redp2p src/redp2p.c)
         target_link_libraries(redp2p PRIVATE redp2p_static)
     endif()
-    target_include_directories(redp2p PRIVATE src lib/monocypher lib/kcp)
+    target_include_directories(redp2p PRIVATE src lib/monocypher lib/kcp lib/parson)
 
     if(UNIX AND NOT ANDROID AND NOT APPLE)
         target_link_libraries(redp2p_shared pthread m)
