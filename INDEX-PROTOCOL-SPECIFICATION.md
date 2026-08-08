@@ -29,7 +29,7 @@ The protocol is language-agnostic: any HTTP server that can accept JSON POST req
 | Field | Type | Description |
 |-------|------|-------------|
 | `id` | string (1..63) | Publisher/consumer identifier, alnum only |
-| `pass` | string (optional) | Shared registration password |
+| `pass` | string (optional, server-side only) | Shared secret configured by index operator; never sent by client |
 | `nonce` | hex string (16 chars) | 8-byte random challenge from server |
 | `solution` | hex string (16 chars) | 8-byte client solution |
 | `proof` | hex string (64 chars) | HMAC-SHA256(pass, nonce\|\|id\|\|solution) |
@@ -58,6 +58,21 @@ Server validates all candidates, deduplicates by (ip,port), recomputes local pri
 
 ---
 
+## Shared Secret Model (Important)
+
+The index may optionally require a shared secret for registration. This is **not a user account password**:
+
+- The secret is **configured by the index operator** (via `REDP2P_PASS` for global, or `REDP2P_VIP` for per-ID)
+- The operator **distributes it out-of-band** to authorized publishers (e.g., in person, via secure channel)
+- The publisher **never sends the secret over the network**
+- The client computes `proof = HMAC-SHA256(secret, nonce_hex || id || solution_hex)` locally
+- The server verifies using its copy of the secret
+- This provides **registration authorization** and **DoS resistance** (via PoW), not user authentication
+
+There are **no user accounts**, no consumer authentication, no identity infrastructure. The index remains stateless and coordination-only.
+
+---
+
 ## Operations
 
 ### `challenge` - Request PoW challenge
@@ -76,7 +91,7 @@ Server validates all candidates, deduplicates by (ip,port), recomputes local pri
 }
 ```
 
-Server stores nothing. Client must solve `proof = HMAC-SHA256(pass, nonce_hex || id || solution_hex)` with `bits` leading zero bits. The `pass` is the global password (if any) or per-VIP password configured on the server; client does not send it in challenge.
+Server stores nothing. Client must solve `proof = HMAC-SHA256(secret, nonce_hex || id || solution_hex)` with `bits` leading zero bits. The `secret` is the global shared secret (if any) or per-VIP shared secret configured on the server; client does not send it in challenge.
 
 ---
 
