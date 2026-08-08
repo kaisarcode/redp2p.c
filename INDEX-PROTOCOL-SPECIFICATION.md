@@ -64,7 +64,7 @@ Server validates all candidates, deduplicates by (ip,port), recomputes local pri
 
 **Request:**
 ```json
-{ "op": "challenge", "id": "publisher1", "pass": "optional_password" }
+{ "op": "challenge", "id": "publisher1" }
 ```
 
 **Response (challenge_required):**
@@ -76,7 +76,7 @@ Server validates all candidates, deduplicates by (ip,port), recomputes local pri
 }
 ```
 
-Server stores nothing. Client must solve `proof = HMAC-SHA256(pass, nonce_hex || id || solution_hex)` with `bits` leading zero bits.
+Server stores nothing. Client must solve `proof = HMAC-SHA256(pass, nonce_hex || id || solution_hex)` with `bits` leading zero bits. The `pass` is the global password (if any) or per-VIP password configured on the server; client does not send it in challenge.
 
 ---
 
@@ -100,6 +100,8 @@ Server stores nothing. Client must solve `proof = HMAC-SHA256(pass, nonce_hex ||
   ]
 }
 ```
+
+The `pass` field is optional. If present, server uses it for PoW verification; otherwise uses server-configured global/VIP password.
 
 **Response (ok):**
 ```json
