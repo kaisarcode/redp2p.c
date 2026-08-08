@@ -295,7 +295,7 @@ PublisherRecord {
 - Default TTL: 120 seconds (`REDP2P_ETIMEOUT_SEC`)
 - Record expired if `now - last_seen > TTL`
 - Expired records filtered from `lookup`/`list` (no write)
-- Physical removal: automatic every 60s in event loop, or explicit `prune` operation
+- Physical removal is an **implementation detail**: each deployment handles it as appropriate (cron job, internal timer, on-demand, etc.). The protocol does not expose a prune endpoint.
 
 ### Seats / Capacity
 
