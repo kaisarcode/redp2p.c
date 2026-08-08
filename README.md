@@ -364,3 +364,4 @@ Vendored third-party source retains its own license:
 
 - KCP, Copyright (c) 2017 Lin Wei, is distributed under the MIT License in `lib/kcp/LICENSE`.
 - Monocypher is distributed under BSD-2-Clause or CC0-1.0 terms in `lib/monocypher/LICENSE`.
+- Parson, Copyright (c) 2012–2022 Krzysztof Gabis, is distributed under the MIT License in `lib/parson/LICENSE`.
