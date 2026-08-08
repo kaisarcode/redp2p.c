@@ -18,6 +18,20 @@
 #include <string.h>
 #include <time.h>
 #include <errno.h>
+#include <signal.h>
+
+static redp2p_t *g_ctx = NULL;
+
+/**
+ * Signal handler for SIGINT/SIGTERM.
+ * Sets the stop flag on the global context to request graceful shutdown.
+ * @param sig Signal number (unused).
+ * @return None.
+ */
+static void sigint_handler(int sig) {
+    (void)sig;
+    if (g_ctx) redp2p_stop(g_ctx);
+}
 
 #ifdef _WIN32
 #  include <process.h>
@@ -517,9 +531,17 @@ int main(int argc, char **argv) {
 
         fprintf(stderr, "redp2p: waiting for connections...\n");
 
+        g_ctx = ctx;
+        signal(SIGINT, sigint_handler);
+        signal(SIGTERM, sigint_handler);
+
         ret = redp2p_wait(ctx, idx_host, idx_port, host, 0);
         if (ret != REDP2P_OK)
             fprintf(stderr, "redp2p: pub exited: %s\n", redp2p_strerror(ret));
+
+        signal(SIGINT, SIG_DFL);
+        signal(SIGTERM, SIG_DFL);
+        g_ctx = NULL;
 
         redp2p_close(ctx);
         redp2p_options_free(&opts);
@@ -618,9 +640,17 @@ int main(int argc, char **argv) {
         redp2p_set_sweep(ctx, opts.sweep);
         redp2p_set_stun_url(ctx, opts.stun_url[0] ? opts.stun_url : NULL);
 
+        g_ctx = ctx;
+        signal(SIGINT, sigint_handler);
+        signal(SIGTERM, sigint_handler);
+
         ret = redp2p_connect(ctx, idx_host, idx_port, self_id, host, 0);
         if (ret != REDP2P_OK)
             fprintf(stderr, "redp2p: connect failed: %s\n", redp2p_strerror(ret));
+
+        signal(SIGINT, SIG_DFL);
+        signal(SIGTERM, SIG_DFL);
+        g_ctx = NULL;
 
         redp2p_close(ctx);
         redp2p_options_free(&opts);
