@@ -280,15 +280,6 @@ static int redp2p_parse_size(const char *text, size_t *out) {
 #define REDP2P_CTRTOK_ANSWER_OK "REDP2P_CTRTOK_ANSWER_OK"
 #define REDP2P_CTRTOK_NONE      "REDP2P_CTRTOK_NONE"
 
-#define REDP2P_INDEX_PATH_REGISTER   "/redp2p/1/register"
-#define REDP2P_INDEX_PATH_DEREGISTER "/redp2p/1/deregister"
-#define REDP2P_INDEX_PATH_LOOKUP     "/redp2p/1/lookup"
-#define REDP2P_INDEX_PATH_LIST       "/redp2p/1/list"
-#define REDP2P_INDEX_PATH_CALL       "/redp2p/1/call"
-#define REDP2P_INDEX_PATH_COLLECT    "/redp2p/1/collect"
-#define REDP2P_INDEX_PATH_ANSWER     "/redp2p/1/answer"
-#define REDP2P_INDEX_PATH_POLL       "/redp2p/1/poll"
-
 #define REDP2P_STREAM_TYPE_HELLO      1u
 #define REDP2P_STREAM_TYPE_HELLO_ACK  2u
 #define REDP2P_STREAM_TYPE_KCP        3u
@@ -3824,7 +3815,7 @@ int redp2p_gather_candidates(redp2p_t *ctx, int udp_fd,
             out[*out_count].priority = redp2p_candidate_priority(&out[*out_count]);
             (*out_count)++;
         }
-        
+
         redp2p_fd_t test_fd = socket(AF_INET, SOCK_DGRAM, 0);
         if (!REDP2P_ISERR(test_fd)) {
             struct sockaddr_in target;
@@ -3832,14 +3823,14 @@ int redp2p_gather_candidates(redp2p_t *ctx, int udp_fd,
             target.sin_family = AF_INET;
             target.sin_port = htons(53);
             inet_pton(AF_INET, "8.8.8.8", &target.sin_addr);
-            
+
             if (connect(test_fd, (struct sockaddr *)&target, sizeof(target)) == 0) {
                 struct sockaddr_in local_sa;
                 socklen_t local_sa_len = sizeof(local_sa);
                 if (getsockname(test_fd, (struct sockaddr *)&local_sa, &local_sa_len) == 0) {
                     char local_ip[64];
                     inet_ntop(AF_INET, &local_sa.sin_addr, local_ip, sizeof(local_ip));
-                    
+
                     if (strcmp(local_ip, "127.0.0.1") != 0 && strcmp(local_ip, "0.0.0.0") != 0 && *out_count < out_cap) {
                         out[*out_count].type = REDP2P_CAND_LAN;
                         strcpy(out[*out_count].addr, local_ip);
