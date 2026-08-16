@@ -150,7 +150,7 @@ Payload commands:
 
 | Command | Args | Result |
 | :--- | :--- | :--- |
-| `open` | `op`: `pub`/`con`/`idx`; `addr`: `id@index[:port]` for pub/con; `host`+`port` for idx; `tcp`/`udp` port; `sweep`, `stun`, `pass`, `seats`, `pow`, `vip` | `{"result":{"handle":N},"handle":N}` |
+| `open` | `op`: `pub`/`con`/`idx`; `addr`: `id@index[:port]` for pub/con; `host`+`port` for idx; `tcp`/`udp` port; `sweep`, `stun`, `pass`, `seats`, `pow`, `vip`, `keys_dir` | `{"result":{"handle":N},"handle":N}` |
 | `status` | `handle` | `{"result":{"state":"running"\|"finished","result":N},"handle":N}` |
 | `stop` | `handle` | `{"result":{"stopped":true},"handle":N}` |
 | `close` | `handle` | `{"result":{"closed":true},"handle":N}` |
@@ -207,6 +207,18 @@ if (redp2p_open(&ctx) == REDP2P_OK) {
     redp2p_close(ctx);
 }
 ```
+
+Custom key directory:
+
+```c
+redp2p_set_keys_dir(ctx, "/data/user/0/com.myapp/files");
+```
+
+`redp2p_set_keys_dir(ctx, dir)` sets the base directory for publisher
+deregistration key files. When set, keys are stored under
+`<dir>/.local/share/redp2p/keys/` instead of `$HOME/.local/share/redp2p/keys/`.
+Pass an empty string to reset to the default path. This is useful on Android
+where `$HOME` is not set and apps use a private file directory.
 
 List active publishers:
 

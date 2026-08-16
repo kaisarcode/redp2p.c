@@ -40,6 +40,7 @@ typedef struct redp2p redp2p_t;
 #define REDP2P_KEY_SZ          16
 #define REDP2P_KEY_STR_SZ      33
 #define REDP2P_PASS_MAX       255
+#define REDP2P_KEYS_DIR_MAX   511
 #define REDP2P_UDP_PAYLOAD_MAX 1412
 #define REDP2P_PEER_CANDIDATES_MAX  8
 
@@ -323,6 +324,19 @@ int sweep
 int redp2p_set_stun_url(
 redp2p_t *ctx,
 const char *url
+);
+
+/**
+ * Sets the base directory for publisher deregistration key files.
+ * Summary: Overrides the default $HOME/.local/share/redp2p/keys path.
+ * When empty, resets to the default path derived from $HOME.
+ * @param ctx Open context.
+ * @param dir Base directory path (non-NULL).
+ * @return REDP2P_OK or REDP2P_EINVAL.
+ */
+int redp2p_set_keys_dir(
+redp2p_t *ctx,
+const char *dir
 );
 
 /**
