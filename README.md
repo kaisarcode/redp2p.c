@@ -130,6 +130,33 @@ REDP2P_PUNCH_POLL_MS
 
 ## Public API
 
+Runner:
+
+```c
+#include "libredp2p.h"
+
+char *result = kc_redp2p_run(
+    "{\"cmd\":\"list\",\"args\":{\"host\":\"127.0.0.1\",\"port\":9876}}",
+    &out_err);
+```
+
+`kc_redp2p_run(payload_json, &out_err)` executes one CLI subcommand from a JSON
+payload and returns the JSON result as a malloc'd string. One-shot commands
+(`del`, `list`) run directly. Long-lived commands (`open`, `status`, `stop`,
+`close`) keep a bounded table of contexts, each running its event loop in a
+background thread, so `pub`, `con`, and `idx` do not block the caller.
+
+Payload commands:
+
+| Command | Args | Result |
+| :--- | :--- | :--- |
+| `open` | `op`: `pub`/`con`/`idx`; `addr`: `id@index[:port]` for pub/con; `host`+`port` for idx; `tcp`/`udp` port; `sweep`, `stun`, `pass`, `seats`, `pow`, `vip` | `{"result":{"handle":N},"handle":N}` |
+| `status` | `handle` | `{"result":{"state":"running"\|"finished","result":N},"handle":N}` |
+| `stop` | `handle` | `{"result":{"stopped":true},"handle":N}` |
+| `close` | `handle` | `{"result":{"closed":true},"handle":N}` |
+| `del` | `addr` | `{"result":{"ok":true},"handle":0}` |
+| `list` | `host`, `port` | `{"result":{"publishers":["id",...]},"handle":0}` |
+
 Start an index:
 
 ```c
@@ -214,6 +241,8 @@ if (redp2p_open(&ctx) == REDP2P_OK) {
 * `redp2p_options_default()` returns initialized runtime options.
 * `redp2p_options_load_env()` loads supported environment values.
 * `redp2p_options_free()` releases option-owned allocations.
+* `kc_redp2p_run()` executes a subcommand from a JSON payload and returns the
+    JSON result (see Public API above).
 * `redp2p_open()` allocates a caller-owned context.
 * `redp2p_serve_index()` runs an index server.
 * `redp2p_wait()` publishes a local service and accepts peer sessions.

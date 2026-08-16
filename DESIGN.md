@@ -190,6 +190,25 @@ It must not expand into:
 * centralized authorization
 * persistent identity infrastructure
 
+## Runner
+
+`kc_redp2p_run()` exposes the CLI subcommands as a synchronous JSON-in/JSON-out
+function, so embedded hosts (for example the JNI bridge) can drive redp2p
+without spawning a CLI subprocess.
+
+One-shot commands (`del`, `list`) run directly and return immediately.
+Long-lived commands (`open`, `status`, `stop`, `close`) keep a bounded table of
+contexts (`REDP2P_RUNNER_SLOTS`), each running its blocking operation
+(`redp2p_wait`, `redp2p_connect`, or `redp2p_serve_index`) in a background
+thread. `open` returns the handle immediately; `status` reports running or
+finished state; `stop` requests termination through `redp2p_stop()` and joins
+the thread; `close` joins and frees the context.
+
+The blocking operations, their event loops, and the wire protocol are
+unchanged. The runner only adds the slot table and thread lifecycle. The CLI
+dispatches every subcommand through the runner and keeps its existing
+interface, arguments, messages, and exit codes.
+
 ## State
 
 Index state is temporary.

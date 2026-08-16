@@ -325,6 +325,18 @@ redp2p_t *ctx,
 const char *url
 );
 
+/**
+ * Executes a CLI subcommand from a JSON payload and returns the result as a
+ * JSON string. Synchronous one-shot commands (del, list) run directly.
+ * Long-lived commands (open/status/stop/close) manage a background thread
+ * per handle so pub, con, and idx run without blocking the caller.
+ * @param payload_json JSON payload with "cmd" and "args".
+ * @param out_err Receives a malloc'd error message on failure, or NULL on
+ *     success.
+ * @return malloc'd JSON result string, or NULL on failure.
+ */
+char *kc_redp2p_run(const char *payload_json, char **out_err);
+
 #ifdef __cplusplus
 }
 #endif

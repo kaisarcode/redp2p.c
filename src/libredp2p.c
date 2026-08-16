@@ -818,7 +818,7 @@ typedef struct {
 
 #ifdef _WIN32
 typedef HANDLE redp2p_thread_t;
-#define REDP2P_THREAD_RET unsigned __stdcall
+#define REDP2P_THREAD_RET unsigned long __stdcall
 #else
 typedef pthread_t redp2p_thread_t;
 #define REDP2P_THREAD_RET void *
@@ -7937,6 +7937,691 @@ unsigned short bind_port)
         result = redp2p_consumer_loop(&runtime);
     }
     redp2p_consumer_runtime_cleanup(&runtime, loop_ran);
+    return result;
+}
+
+#define REDP2P_RUNNER_SLOTS 8
+#define REDP2P_RUNNER_STATE_FREE     0
+#define REDP2P_RUNNER_STATE_RUNNING  1
+#define REDP2P_RUNNER_STATE_FINISHED 2
+#define REDP2P_RUNNER_OP_PUB 1
+#define REDP2P_RUNNER_OP_CON 2
+#define REDP2P_RUNNER_OP_IDX 3
+
+#ifdef _WIN32
+static SRWLOCK g_runner_mutex = SRWLOCK_INIT;
+#else
+static pthread_mutex_t g_runner_mutex = PTHREAD_MUTEX_INITIALIZER;
+#endif
+
+typedef struct {
+    redp2p_t *ctx;
+    redp2p_thread_t thread;
+    _Atomic int state;
+    _Atomic int result;
+    int op;
+    char index_host[256];
+    unsigned short index_port;
+    char self_id[REDP2P_ID_MAX + 1];
+    char target_id[REDP2P_ID_MAX + 1];
+    unsigned short bind_port;
+    char host[256];
+    unsigned short port;
+} redp2p_runner_slot_t;
+
+static redp2p_runner_slot_t g_runner_slots[REDP2P_RUNNER_SLOTS];
+
+/**
+ * Locks the runner slot table.
+ * @return None.
+ */
+static void redp2p_runner_lock(void) {
+#ifdef _WIN32
+    AcquireSRWLockExclusive(&g_runner_mutex);
+#else
+    pthread_mutex_lock(&g_runner_mutex);
+#endif
+}
+
+/**
+ * Unlocks the runner slot table.
+ * @return None.
+ */
+static void redp2p_runner_unlock(void) {
+#ifdef _WIN32
+    ReleaseSRWLockExclusive(&g_runner_mutex);
+#else
+    pthread_mutex_unlock(&g_runner_mutex);
+#endif
+}
+
+/**
+ * Runs one blocking redp2p operation on a runner slot.
+ * @param arg Runner slot pointer.
+ * @return Thread status.
+ */
+static REDP2P_THREAD_RET redp2p_runner_thread(void *arg) {
+    redp2p_runner_slot_t *slot;
+    int result;
+
+    slot = (redp2p_runner_slot_t *)arg;
+    if (slot->op == REDP2P_RUNNER_OP_PUB) {
+        result = redp2p_wait(slot->ctx, slot->index_host, slot->index_port,
+            slot->self_id, slot->bind_port);
+    } else if (slot->op == REDP2P_RUNNER_OP_CON) {
+        result = redp2p_connect(slot->ctx, slot->index_host, slot->index_port,
+            slot->self_id, slot->target_id, slot->bind_port);
+    } else {
+        result = redp2p_serve_index(slot->ctx,
+            slot->host[0] != '\0' ? slot->host : NULL, slot->port);
+    }
+    atomic_store(&slot->result, result);
+    atomic_store(&slot->state, REDP2P_RUNNER_STATE_FINISHED);
+#ifdef _WIN32
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
+/**
+ * Starts one runner thread.
+ * @param slot Runner slot.
+ * @return 0 on success, 1 on failure.
+ */
+static int redp2p_runner_thread_start(redp2p_runner_slot_t *slot) {
+#ifdef _WIN32
+    slot->thread = CreateThread(NULL, 0, redp2p_runner_thread, slot, 0, NULL);
+    return slot->thread != NULL ? 0 : 1;
+#else
+    return pthread_create(&slot->thread, NULL, redp2p_runner_thread, slot) == 0
+        ? 0 : 1;
+#endif
+}
+
+/**
+ * Joins one runner thread.
+ * @param slot Runner slot.
+ * @return None.
+ */
+static void redp2p_runner_thread_join(redp2p_runner_slot_t *slot) {
+#ifdef _WIN32
+    if (slot->thread) {
+        WaitForSingleObject(slot->thread, INFINITE);
+        CloseHandle(slot->thread);
+        slot->thread = NULL;
+    }
+#else
+    if (slot->thread) {
+        pthread_join(slot->thread, NULL);
+        slot->thread = 0;
+    }
+#endif
+}
+
+/**
+ * Allocates a free runner slot.
+ * @param out Receives the slot index plus one (handle), or 0 when full.
+ * @return 0 on success, 1 when the table is full.
+ */
+static int redp2p_runner_slot_alloc(int *out) {
+    int i;
+
+    redp2p_runner_lock();
+    for (i = 0; i < REDP2P_RUNNER_SLOTS; i++) {
+        if (atomic_load(&g_runner_slots[i].state) == REDP2P_RUNNER_STATE_FREE) {
+            atomic_store(&g_runner_slots[i].state, REDP2P_RUNNER_STATE_RUNNING);
+            atomic_store(&g_runner_slots[i].result, 0);
+            g_runner_slots[i].thread = 0;
+            *out = i + 1;
+            redp2p_runner_unlock();
+            return 0;
+        }
+    }
+    redp2p_runner_unlock();
+    return 1;
+}
+
+/**
+ * Returns one runner slot by handle.
+ * @param handle Handle from a previous open (1..REDP2P_RUNNER_SLOTS).
+ * @return Slot pointer, or NULL when the handle is out of range.
+ */
+static redp2p_runner_slot_t *redp2p_runner_slot_get(int handle) {
+    if (handle < 1 || handle > REDP2P_RUNNER_SLOTS) return NULL;
+    return &g_runner_slots[handle - 1];
+}
+
+/**
+ * Parses one bounded port value from a JSON object.
+ * @param o JSON object.
+ * @param key Key name.
+ * @param out Output port.
+ * @return 0 on success, 1 on missing or invalid value.
+ */
+static int redp2p_runner_port(JSON_Object *o, const char *key,
+    unsigned short *out)
+{
+    double value;
+    JSON_Value *v;
+
+    v = json_object_get_value(o, key);
+    if (v == NULL || json_value_get_type(v) != JSONNumber) return 1;
+    value = json_value_get_number(v);
+    if (value < REDP2P_PORT_MIN || value > REDP2P_PORT_MAX) return 1;
+    if (value != (double)(long)value) return 1;
+    *out = (unsigned short)(long)value;
+    return 0;
+}
+
+/**
+ * Parses one host@index[:port] address string.
+ * @param text Input address text.
+ * @param hostname Output hostname buffer.
+ * @param hn_sz Output hostname buffer capacity.
+ * @param idx_addr Output index address buffer.
+ * @param ia_sz Output index address buffer capacity.
+ * @param idx_port Output index port.
+ * @return 0 on success, 1 on failure.
+ */
+static int redp2p_runner_parse_addr(const char *text, char *hostname,
+    size_t hn_sz, char *idx_addr, size_t ia_sz, unsigned short *idx_port)
+{
+    const char *at;
+    const char *colon;
+    size_t n;
+    long val;
+
+    if (!text || !text[0] || !hostname || hn_sz == 0 || !idx_addr ||
+        ia_sz == 0 || !idx_port)
+        return 1;
+    at = strrchr(text, '@');
+    if (!at || at == text) return 1;
+    n = (size_t)(at - text);
+    if (n == 0 || n >= hn_sz) return 1;
+    memcpy(hostname, text, n);
+    hostname[n] = '\0';
+    at++;
+    colon = strrchr(at, ':');
+    if (colon && strchr(at, ':') != colon) {
+        n = strlen(at);
+        if (n == 0 || n >= ia_sz) return 1;
+        memcpy(idx_addr, at, n + 1);
+        *idx_port = REDP2P_PORT_DEFAULT;
+        return 0;
+    }
+    if (!colon) {
+        n = strlen(at);
+        if (n == 0 || n >= ia_sz) return 1;
+        memcpy(idx_addr, at, n + 1);
+        *idx_port = REDP2P_PORT_DEFAULT;
+        return 0;
+    }
+    if (colon == at || colon[1] == '\0') return 1;
+    n = (size_t)(colon - at);
+    if (n == 0 || n >= ia_sz) return 1;
+    memcpy(idx_addr, at, n);
+    idx_addr[n] = '\0';
+    if (!redp2p_parse_u(colon + 1, REDP2P_PORT_MIN, REDP2P_PORT_MAX, &val))
+        return 1;
+    *idx_port = (unsigned short)val;
+    return 0;
+}
+
+/**
+ * Configures a publisher or consumer context from runner args.
+ * @param ctx Open context.
+ * @param o JSON args object.
+ * @return 0 on success, 1 on invalid option values.
+ */
+static int redp2p_runner_setup_client(redp2p_t *ctx, JSON_Object *o) {
+    const char *text;
+    double sweep;
+    unsigned short service_port;
+
+    text = json_object_get_string(o, "pass");
+    if (text != NULL && redp2p_set_pass(ctx, text) != REDP2P_OK) return 1;
+    if (redp2p_runner_port(o, "tcp", &service_port) == 0) {
+        if (redp2p_set_protocol(ctx, REDP2P_PROTO_TCP) != REDP2P_OK) return 1;
+    } else if (redp2p_runner_port(o, "udp", &service_port) == 0) {
+        if (redp2p_set_protocol(ctx, REDP2P_PROTO_UDP) != REDP2P_OK) return 1;
+    } else {
+        return 1;
+    }
+    if (redp2p_set_port(ctx, service_port) != REDP2P_OK) return 1;
+    sweep = 0;
+    {
+        JSON_Value *v = json_object_get_value(o, "sweep");
+        if (v != NULL) {
+            if (json_value_get_type(v) != JSONNumber) return 1;
+            sweep = json_value_get_number(v);
+            if (sweep < 0 || sweep > REDP2P_SWEEP_MAX) return 1;
+            if (sweep != (double)(long)sweep) return 1;
+        }
+    }
+    redp2p_set_sweep(ctx, (int)sweep);
+    text = json_object_get_string(o, "stun");
+    if (text != NULL && text[0] != '\0' &&
+        redp2p_set_stun_url(ctx, text) != REDP2P_OK)
+        return 1;
+    return 0;
+}
+
+/**
+ * Builds the standard runner response wrapper.
+ * @param result_json JSON result value.
+ * @param handle Handle value.
+ * @return malloc'd JSON string, or NULL on allocation failure.
+ */
+static char *redp2p_runner_wrap(JSON_Value *result_json, int handle) {
+    JSON_Value *root;
+    char *out;
+
+    root = json_value_init_object();
+    if (root == NULL) {
+        json_value_free(result_json);
+        return NULL;
+    }
+    json_object_set_value(json_value_get_object(root), "result", result_json);
+    json_object_set_number(json_value_get_object(root), "handle", handle);
+    out = json_serialize_to_string(root);
+    json_value_free(root);
+    return out;
+}
+
+/**
+ * Handles the runner open command: starts pub, con, or idx in a thread.
+ * @param o JSON args object.
+ * @return malloc'd JSON result string, or NULL on failure.
+ */
+static char *redp2p_runner_open(JSON_Object *o) {
+    const char *op;
+    const char *addr;
+    const char *host;
+    redp2p_runner_slot_t *slot;
+    char vip_err[256];
+    long number;
+    int handle;
+
+    op = json_object_get_string(o, "op");
+    if (op == NULL) return NULL;
+    if (strcmp(op, "pub") != 0 && strcmp(op, "con") != 0 &&
+        strcmp(op, "idx") != 0)
+        return NULL;
+    if (redp2p_runner_slot_alloc(&handle) != 0) return NULL;
+    slot = redp2p_runner_slot_get(handle);
+    memset(slot, 0, sizeof(*slot));
+    atomic_store(&slot->state, REDP2P_RUNNER_STATE_RUNNING);
+    if (redp2p_open(&slot->ctx) != REDP2P_OK) {
+        atomic_store(&slot->state, REDP2P_RUNNER_STATE_FREE);
+        return NULL;
+    }
+    if (strcmp(op, "pub") == 0) {
+        addr = json_object_get_string(o, "addr");
+        if (addr == NULL ||
+            redp2p_runner_parse_addr(addr, slot->self_id,
+                sizeof(slot->self_id), slot->index_host,
+                sizeof(slot->index_host), &slot->index_port) != 0 ||
+            !redp2p_is_valid_id(slot->self_id) ||
+            redp2p_runner_setup_client(slot->ctx, o) != 0)
+        {
+            redp2p_close(slot->ctx);
+            slot->ctx = NULL;
+            atomic_store(&slot->state, REDP2P_RUNNER_STATE_FREE);
+            return NULL;
+        }
+        slot->bind_port = slot->ctx->bind_port;
+        slot->op = REDP2P_RUNNER_OP_PUB;
+    } else if (strcmp(op, "con") == 0) {
+        addr = json_object_get_string(o, "addr");
+        if (addr == NULL ||
+            redp2p_runner_parse_addr(addr, slot->target_id,
+                sizeof(slot->target_id), slot->index_host,
+                sizeof(slot->index_host), &slot->index_port) != 0 ||
+            !redp2p_is_valid_id(slot->target_id) ||
+            redp2p_runner_setup_client(slot->ctx, o) != 0)
+        {
+            redp2p_close(slot->ctx);
+            slot->ctx = NULL;
+            atomic_store(&slot->state, REDP2P_RUNNER_STATE_FREE);
+            return NULL;
+        }
+        snprintf(slot->self_id, sizeof(slot->self_id), "c%d", handle);
+        slot->bind_port = slot->ctx->bind_port;
+        slot->op = REDP2P_RUNNER_OP_CON;
+    } else {
+        host = json_object_get_string(o, "host");
+        if (host != NULL && host[0] != '\0') {
+            snprintf(slot->host, sizeof(slot->host), "%s", host);
+        } else {
+            slot->host[0] = '\0';
+        }
+        if (redp2p_runner_port(o, "port", &slot->port) != 0) {
+            redp2p_close(slot->ctx);
+            slot->ctx = NULL;
+            atomic_store(&slot->state, REDP2P_RUNNER_STATE_FREE);
+            return NULL;
+        }
+        slot->op = REDP2P_RUNNER_OP_IDX;
+        {
+            const char *pass = json_object_get_string(o, "pass");
+            if (pass != NULL && redp2p_set_pass(slot->ctx, pass) != REDP2P_OK) {
+                redp2p_close(slot->ctx);
+                slot->ctx = NULL;
+                atomic_store(&slot->state, REDP2P_RUNNER_STATE_FREE);
+                return NULL;
+            }
+        }
+        number = 0;
+        {
+            JSON_Value *v = json_object_get_value(o, "seats");
+            if (v != NULL) {
+                if (json_value_get_type(v) != JSONNumber) {
+                    redp2p_close(slot->ctx);
+                    slot->ctx = NULL;
+                    atomic_store(&slot->state, REDP2P_RUNNER_STATE_FREE);
+                    return NULL;
+                }
+                number = (long)json_value_get_number(v);
+                if (number < 0 ||
+                    redp2p_set_seats(slot->ctx, (size_t)number) != REDP2P_OK)
+                {
+                    redp2p_close(slot->ctx);
+                    slot->ctx = NULL;
+                    atomic_store(&slot->state, REDP2P_RUNNER_STATE_FREE);
+                    return NULL;
+                }
+            }
+        }
+        number = 0;
+        {
+            JSON_Value *v = json_object_get_value(o, "pow");
+            if (v != NULL) {
+                if (json_value_get_type(v) != JSONNumber) {
+                    redp2p_close(slot->ctx);
+                    slot->ctx = NULL;
+                    atomic_store(&slot->state, REDP2P_RUNNER_STATE_FREE);
+                    return NULL;
+                }
+                number = (long)json_value_get_number(v);
+                if (number < 0 || number > REDP2P_POW_MAX) {
+                    redp2p_close(slot->ctx);
+                    slot->ctx = NULL;
+                    atomic_store(&slot->state, REDP2P_RUNNER_STATE_FREE);
+                    return NULL;
+                }
+                redp2p_set_pow(slot->ctx, (int)number);
+            }
+        }
+        vip_err[0] = '\0';
+        if (redp2p_set_vip(slot->ctx, json_object_get_string(o, "vip"),
+            vip_err, sizeof(vip_err)) != REDP2P_OK)
+        {
+            redp2p_close(slot->ctx);
+            slot->ctx = NULL;
+            atomic_store(&slot->state, REDP2P_RUNNER_STATE_FREE);
+            return NULL;
+        }
+    }
+    if (redp2p_runner_thread_start(slot) != 0) {
+        redp2p_close(slot->ctx);
+        slot->ctx = NULL;
+        atomic_store(&slot->state, REDP2P_RUNNER_STATE_FREE);
+        return NULL;
+    }
+    {
+        JSON_Value *result_json;
+        char *out;
+
+        result_json = json_value_init_object();
+        if (result_json == NULL) return NULL;
+        json_object_set_number(json_value_get_object(result_json), "handle",
+            handle);
+        out = redp2p_runner_wrap(result_json, handle);
+        return out;
+    }
+}
+
+/**
+ * Handles the runner status command.
+ * @param o JSON args object.
+ * @return malloc'd JSON result string, or NULL on failure.
+ */
+static char *redp2p_runner_status(JSON_Object *o) {
+    long handle_value;
+    redp2p_runner_slot_t *slot;
+    JSON_Value *result_json;
+    JSON_Value *v;
+    int state;
+    char *out;
+
+    v = json_object_get_value(o, "handle");
+    if (v == NULL || json_value_get_type(v) != JSONNumber) return NULL;
+    handle_value = (long)json_value_get_number(v);
+    slot = redp2p_runner_slot_get((int)handle_value);
+    if (slot == NULL) return NULL;
+    state = atomic_load(&slot->state);
+    result_json = json_value_init_object();
+    if (result_json == NULL) return NULL;
+    if (state == REDP2P_RUNNER_STATE_RUNNING) {
+        json_object_set_string(json_value_get_object(result_json), "state",
+            "running");
+    } else {
+        json_object_set_string(json_value_get_object(result_json), "state",
+            "finished");
+        json_object_set_number(json_value_get_object(result_json), "result",
+            atomic_load(&slot->result));
+    }
+    out = redp2p_runner_wrap(result_json, (int)handle_value);
+    return out;
+}
+
+/**
+ * Handles the runner stop command.
+ * @param o JSON args object.
+ * @return malloc'd JSON result string, or NULL on failure.
+ */
+static char *redp2p_runner_stop(JSON_Object *o) {
+    long handle_value;
+    redp2p_runner_slot_t *slot;
+    JSON_Value *result_json;
+    JSON_Value *v;
+    char *out;
+
+    v = json_object_get_value(o, "handle");
+    if (v == NULL || json_value_get_type(v) != JSONNumber) return NULL;
+    handle_value = (long)json_value_get_number(v);
+    slot = redp2p_runner_slot_get((int)handle_value);
+    if (slot == NULL) return NULL;
+    if (atomic_load(&slot->state) == REDP2P_RUNNER_STATE_RUNNING)
+        redp2p_stop(slot->ctx);
+    redp2p_runner_thread_join(slot);
+    atomic_store(&slot->state, REDP2P_RUNNER_STATE_FINISHED);
+    result_json = json_value_init_object();
+    if (result_json == NULL) return NULL;
+    json_object_set_boolean(json_value_get_object(result_json), "stopped", 1);
+    out = redp2p_runner_wrap(result_json, (int)handle_value);
+    return out;
+}
+
+/**
+ * Handles the runner close command: joins, releases, and frees the slot.
+ * @param o JSON args object.
+ * @return malloc'd JSON result string, or NULL on failure.
+ */
+static char *redp2p_runner_close(JSON_Object *o) {
+    long handle_value;
+    redp2p_runner_slot_t *slot;
+    JSON_Value *result_json;
+    JSON_Value *v;
+    char *out;
+
+    v = json_object_get_value(o, "handle");
+    if (v == NULL || json_value_get_type(v) != JSONNumber) return NULL;
+    handle_value = (long)json_value_get_number(v);
+    slot = redp2p_runner_slot_get((int)handle_value);
+    if (slot == NULL) return NULL;
+    if (atomic_load(&slot->state) == REDP2P_RUNNER_STATE_RUNNING)
+        redp2p_stop(slot->ctx);
+    redp2p_runner_thread_join(slot);
+    redp2p_close(slot->ctx);
+    slot->ctx = NULL;
+    atomic_store(&slot->state, REDP2P_RUNNER_STATE_FREE);
+    result_json = json_value_init_object();
+    if (result_json == NULL) return NULL;
+    json_object_set_boolean(json_value_get_object(result_json), "closed", 1);
+    out = redp2p_runner_wrap(result_json, (int)handle_value);
+    return out;
+}
+
+/**
+ * Publishes one deregistration through the runner.
+ * @param o JSON args object.
+ * @return malloc'd JSON result string, or NULL on failure.
+ */
+static char *redp2p_runner_del(JSON_Object *o) {
+    const char *addr;
+    char hostname[REDP2P_ID_MAX + 1];
+    char idx_host[256];
+    unsigned short idx_port;
+    redp2p_t *ctx;
+    int result;
+
+    addr = json_object_get_string(o, "addr");
+    if (addr == NULL ||
+        redp2p_runner_parse_addr(addr, hostname, sizeof(hostname), idx_host,
+            sizeof(idx_host), &idx_port) != 0 ||
+        !redp2p_is_valid_id(hostname))
+        return NULL;
+    if (redp2p_open(&ctx) != REDP2P_OK) return NULL;
+    result = redp2p_deregister(ctx, idx_host, idx_port, hostname);
+    redp2p_close(ctx);
+    if (result != REDP2P_OK) return NULL;
+    {
+        JSON_Value *result_json = json_value_init_object();
+        if (result_json == NULL) return NULL;
+        json_object_set_boolean(json_value_get_object(result_json), "ok", 1);
+        return redp2p_runner_wrap(result_json, 0);
+    }
+}
+
+/**
+ * Collects one publisher id into the result array.
+ * @param id Publisher identifier.
+ * @param userdata JSON array.
+ * @return None.
+ */
+static void redp2p_runner_collect_id(const char *id, void *userdata) {
+    JSON_Array *array;
+
+    array = (JSON_Array *)userdata;
+    if (id != NULL) json_array_append_string(array, id);
+}
+
+/**
+ * Publishes one index publisher listing through the runner.
+ * @param o JSON args object.
+ * @return malloc'd JSON result string, or NULL on failure.
+ */
+static char *redp2p_runner_list(JSON_Object *o) {
+    const char *host;
+    unsigned short port;
+    redp2p_t *ctx;
+    JSON_Value *result_json;
+    JSON_Value *publishers;
+    int result;
+
+    host = json_object_get_string(o, "host");
+    if (host == NULL) host = "127.0.0.1";
+    if (redp2p_runner_port(o, "port", &port) != 0) return NULL;
+    if (redp2p_open(&ctx) != REDP2P_OK) return NULL;
+    result_json = json_value_init_object();
+    publishers = json_value_init_array();
+    if (result_json == NULL || publishers == NULL) {
+        json_value_free(result_json);
+        json_value_free(publishers);
+        redp2p_close(ctx);
+        return NULL;
+    }
+    result = redp2p_list_publishers(ctx, host, port,
+        redp2p_runner_collect_id, json_value_get_array(publishers));
+    redp2p_close(ctx);
+    if (result != REDP2P_OK) {
+        json_value_free(result_json);
+        json_value_free(publishers);
+        return NULL;
+    }
+    json_object_set_value(json_value_get_object(result_json), "publishers",
+        publishers);
+    return redp2p_runner_wrap(result_json, 0);
+}
+
+/**
+ * Executes a CLI subcommand from a JSON payload and returns the result as a
+ * JSON string. Synchronous one-shot commands (del, list) run directly.
+ * Long-lived commands (open/status/stop/close) manage a background thread
+ * per handle.
+ * @param payload_json JSON payload with "cmd" and "args".
+ * @param out_err Receives a malloc'd error message on failure, or NULL on
+ *     success.
+ * @return malloc'd JSON result string, or NULL on failure.
+ */
+char *kc_redp2p_run(const char *payload_json, char **out_err) {
+    JSON_Value *root;
+    JSON_Object *o;
+    JSON_Object *args;
+    const char *cmd;
+    char *result;
+    char *err_text;
+
+    if (out_err != NULL) *out_err = NULL;
+    if (payload_json == NULL) {
+        err_text = strdup("missing payload");
+        if (out_err != NULL) *out_err = err_text;
+        return NULL;
+    }
+    root = json_parse_string(payload_json);
+    if (root == NULL || json_value_get_type(root) != JSONObject) {
+        json_value_free(root);
+        err_text = strdup("missing or invalid \"cmd\"");
+        if (out_err != NULL) *out_err = err_text;
+        return NULL;
+    }
+    o = json_value_get_object(root);
+    cmd = json_object_get_string(o, "cmd");
+    if (cmd == NULL) {
+        json_value_free(root);
+        err_text = strdup("missing or invalid \"cmd\"");
+        if (out_err != NULL) *out_err = err_text;
+        return NULL;
+    }
+    args = json_object_get_object(o, "args");
+    if (args == NULL) {
+        json_value_free(root);
+        err_text = strdup("missing \"args\"");
+        if (out_err != NULL) *out_err = err_text;
+        return NULL;
+    }
+    result = NULL;
+    if (strcmp(cmd, "open") == 0) {
+        result = redp2p_runner_open(args);
+    } else if (strcmp(cmd, "status") == 0) {
+        result = redp2p_runner_status(args);
+    } else if (strcmp(cmd, "stop") == 0) {
+        result = redp2p_runner_stop(args);
+    } else if (strcmp(cmd, "close") == 0) {
+        result = redp2p_runner_close(args);
+    } else if (strcmp(cmd, "del") == 0) {
+        result = redp2p_runner_del(args);
+    } else if (strcmp(cmd, "list") == 0) {
+        result = redp2p_runner_list(args);
+    }
+    json_value_free(root);
+    if (result == NULL) {
+        err_text = strdup("unknown command or invalid arguments");
+        if (out_err != NULL) *out_err = err_text;
+        return NULL;
+    }
     return result;
 }
 

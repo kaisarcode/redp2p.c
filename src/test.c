@@ -3672,6 +3672,126 @@ static int case_redp2p_set_stun_url(void) {
 }
 
 /**
+ * Verifies that the runner rejects malformed and unknown payloads.
+ * @return 0 on success, 1 on failure.
+ */
+static int case_redp2p_run_errors(void) {
+    const char *payloads[] = {
+        NULL,
+        "not json",
+        "{\"cmd\":\"bogus\",\"args\":{}}",
+        "{\"cmd\":\"del\",\"args\":{}}",
+        "{\"cmd\":\"del\",\"args\":{\"addr\":\"no-at-sign\"}}",
+        "{\"cmd\":\"list\",\"args\":{\"port\":9876}}",
+        "{\"cmd\":\"open\",\"args\":{\"op\":\"bogus\",\"port\":9876}}",
+        NULL
+    };
+    int rc;
+    int i;
+
+    rc = 0;
+    for (i = 0; payloads[i] != NULL; i++) {
+        char *err = NULL;
+        char *res;
+
+        res = kc_redp2p_run(payloads[i], &err);
+        rc += expect_true("run rejects bad payload", res == NULL);
+        rc += expect_true("run sets error", err != NULL);
+        free(res);
+        free(err);
+    }
+    return rc == 0 ? 0 : 1;
+}
+
+/**
+ * Opens, polls, and closes a local index through the runner.
+ * @return 0 on success, 1 on failure.
+ */
+static int case_redp2p_run_idx_lifecycle(void) {
+    char payload[256];
+    char status[256];
+    char *err = NULL;
+    char *res;
+    int rc;
+    int i;
+
+    rc = 0;
+    snprintf(payload, sizeof(payload),
+        "{\"cmd\":\"open\",\"args\":{\"op\":\"idx\",\"port\":%u}}",
+        (unsigned)test_port_base());
+    res = kc_redp2p_run(payload, &err);
+    rc += expect_true("run open idx returns result", res != NULL);
+    rc += expect_true("run open idx clears error", err == NULL);
+    free(res);
+    free(err);
+    err = NULL;
+
+    for (i = 0; i < 20; i++) {
+        const char *state;
+
+        snprintf(status, sizeof(status),
+            "{\"cmd\":\"status\",\"args\":{\"handle\":1}}");
+        res = kc_redp2p_run(status, &err);
+        if (res == NULL) {
+            free(err);
+            err = NULL;
+            continue;
+        }
+        state = strstr(res, "\"state\":\"running\"");
+        free(res);
+        if (state != NULL) break;
+        test_sleep_ms(100);
+    }
+    rc += expect_true("run idx status running", i < 20);
+
+    res = kc_redp2p_run("{\"cmd\":\"close\",\"args\":{\"handle\":1}}", &err);
+    rc += expect_true("run close idx returns result", res != NULL);
+    rc += expect_true("run close idx clears error", err == NULL);
+    free(res);
+    free(err);
+    return rc == 0 ? 0 : 1;
+}
+
+/**
+ * Publishes one runner list request and verifies the exact JSON result.
+ * @return 0 on success, 1 on failure.
+ */
+static int case_redp2p_run_list(void) {
+    char payload[256];
+    char *err = NULL;
+    char *res;
+    int rc;
+
+    rc = 0;
+    snprintf(payload, sizeof(payload),
+        "{\"cmd\":\"open\",\"args\":{\"op\":\"idx\",\"port\":%u}}",
+        (unsigned)test_port_base());
+    res = kc_redp2p_run(payload, &err);
+    rc += expect_true("run list open idx", res != NULL);
+    free(res);
+    free(err);
+    err = NULL;
+    test_sleep_ms(300);
+
+    snprintf(payload, sizeof(payload),
+        "{\"cmd\":\"list\",\"args\":{\"host\":\"127.0.0.1\",\"port\":%u}}",
+        (unsigned)test_port_base());
+    res = kc_redp2p_run(payload, &err);
+    rc += expect_true("run list returns result", res != NULL);
+    rc += expect_true("run list has publishers",
+        res != NULL && strstr(res, "\"publishers\"") != NULL);
+    free(res);
+    free(err);
+    err = NULL;
+
+    res = kc_redp2p_run("{\"cmd\":\"close\",\"args\":{\"handle\":1}}", &err);
+    rc += expect_true("run list close idx", res != NULL);
+    free(res);
+    free(err);
+    return rc == 0 ? 0 : 1;
+}
+
+/**
  * Dispatches one named test case.
  * @param name Public API function name.
  * @return 0 on success, 1 on failure, 2 for an unknown case.
@@ -3705,6 +3825,9 @@ static int run_case(const char *name) {
     if (strcmp(name, "redp2p_set_vip") == 0) return case_redp2p_set_vip();
     if (strcmp(name, "redp2p_set_sweep") == 0) return case_redp2p_set_sweep();
     if (strcmp(name, "redp2p_set_stun_url") == 0) return case_redp2p_set_stun_url();
+    if (strcmp(name, "redp2p_run_errors") == 0) return case_redp2p_run_errors();
+    if (strcmp(name, "redp2p_run_idx_lifecycle") == 0) return case_redp2p_run_idx_lifecycle();
+    if (strcmp(name, "redp2p_run_list") == 0) return case_redp2p_run_list();
     fprintf(stderr, "unknown test case: %s\n", name);
     return 2;
 }

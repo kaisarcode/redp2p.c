@@ -12,6 +12,7 @@
 #endif
 
 #include "libredp2p.h"
+#include "parson.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,17 +21,18 @@
 #include <errno.h>
 #include <signal.h>
 
-static redp2p_t *g_ctx = NULL;
+static volatile sig_atomic_t g_stop_requested = 0;
 
 /**
  * Signal handler for SIGINT/SIGTERM.
- * Sets the stop flag on the global context to request graceful shutdown.
+ * Sets the stop flag so the runner loop requests shutdown of the active
+ * operation.
  * @param sig Signal number (unused).
  * @return None.
  */
 static void sigint_handler(int sig) {
     (void)sig;
-    if (g_ctx) redp2p_stop(g_ctx);
+    g_stop_requested = 1;
 }
 
 #ifdef _WIN32
@@ -280,16 +282,222 @@ printf("  idx <port> -p, --prune                 Prune expired index records\n")
 }
 
 /**
- * Prints one publisher identifier to stdout.
- * @param id Publisher identifier.
- * @param userdata Output failure flag.
+ * Prints the publisher ids from a runner list result, one per line.
+ * @param result_json Runner list result JSON string.
+ * @return 0 on success, 1 on malformed result or write failure.
+ */
+static int kc_redp2p_print_publishers(const char *result_json) {
+    JSON_Value *root;
+    JSON_Object *o;
+    JSON_Object *res;
+    JSON_Array *publishers;
+    size_t count;
+    size_t i;
+    int failed;
+
+    root = json_parse_string(result_json);
+    if (root == NULL || json_value_get_type(root) != JSONObject) {
+        json_value_free(root);
+        return 1;
+    }
+    o = json_value_get_object(root);
+    res = json_object_get_object(o, "result");
+    if (res == NULL) {
+        json_value_free(root);
+        return 1;
+    }
+    publishers = json_object_get_array(res, "publishers");
+    if (publishers == NULL) {
+        json_value_free(root);
+        return 1;
+    }
+    failed = 0;
+    count = json_array_get_count(publishers);
+    for (i = 0; i < count; i++) {
+        const char *id;
+
+        id = json_array_get_string(publishers, i);
+        if (id == NULL || fprintf(stdout, "%s\n", id) < 0) failed = 1;
+    }
+    json_value_free(root);
+    return failed;
+}
+
+/**
+ * Sleeps for a bounded delay across platforms.
+ * @param ms Delay in milliseconds.
  * @return None.
  */
-static void print_publisher(const char *id, void *userdata) {
-    int *output_failed;
+static void cli_sleep_ms(int ms) {
+#ifdef _WIN32
+    Sleep((DWORD)ms);
+#else
+    struct timespec ts;
 
-    output_failed = (int *)userdata;
-    if (fprintf(stdout, "%s\n", id) < 0) *output_failed = 1;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+#endif
+}
+
+/**
+ * Builds a runner request root with a command and empty args object.
+ * @param cmd Command name.
+ * @param args_out Receives the args object.
+ * @return malloc'd JSON root, or NULL on allocation failure.
+ */
+static JSON_Value *cli_runner_root(const char *cmd, JSON_Value **args_out) {
+    JSON_Value *root;
+    JSON_Value *args;
+
+    root = json_value_init_object();
+    args = json_value_init_object();
+    if (root == NULL || args == NULL) {
+        json_value_free(root);
+        json_value_free(args);
+        return NULL;
+    }
+    json_object_set_string(json_value_get_object(root), "cmd", cmd);
+    json_object_set_value(json_value_get_object(root), "args", args);
+    if (args_out != NULL) *args_out = args;
+    return root;
+}
+
+/**
+ * Serializes and dispatches one runner request, releasing the request root.
+ * @param root Request JSON root (consumed).
+ * @param out_err Receives a malloc'd error message on failure, or NULL on
+ *     success.
+ * @return malloc'd result JSON string, or NULL on failure.
+ */
+static char *cli_runner_call(JSON_Value *root, char **out_err) {
+    char *payload;
+    char *result;
+
+    payload = json_serialize_to_string(root);
+    json_value_free(root);
+    if (payload == NULL) return NULL;
+    result = kc_redp2p_run(payload, out_err);
+    free(payload);
+    return result;
+}
+
+/**
+ * Opens a long-lived runner operation and returns its handle.
+ * @param root Request JSON root with args (consumed).
+ * @param handle_out Receives the runner handle.
+ * @param out_err Receives a malloc'd error message on failure.
+ * @return 0 on success, 1 on failure.
+ */
+static int cli_runner_open(JSON_Value *root, int *handle_out, char **out_err) {
+    char *result;
+    JSON_Value *parsed;
+    JSON_Value *v;
+    double handle;
+
+    result = cli_runner_call(root, out_err);
+    if (result == NULL) return 1;
+    parsed = json_parse_string(result);
+    free(result);
+    if (parsed == NULL || json_value_get_type(parsed) != JSONObject) {
+        json_value_free(parsed);
+        return 1;
+    }
+    v = json_object_get_value(json_value_get_object(parsed), "handle");
+    if (v == NULL || json_value_get_type(v) != JSONNumber) {
+        json_value_free(parsed);
+        return 1;
+    }
+    handle = json_value_get_number(v);
+    json_value_free(parsed);
+    *handle_out = (int)handle;
+    return 0;
+}
+
+/**
+ * Requests stop for one runner handle.
+ * @param handle Runner handle.
+ * @return None.
+ */
+static void cli_runner_stop(int handle) {
+    JSON_Value *root;
+    JSON_Value *args;
+    char *err = NULL;
+    char *result;
+
+    root = cli_runner_root("stop", &args);
+    if (root == NULL) return;
+    json_object_set_number(json_value_get_object(args), "handle", (double)handle);
+    result = cli_runner_call(root, &err);
+    free(result);
+    free(err);
+}
+
+/**
+ * Closes one runner handle.
+ * @param handle Runner handle.
+ * @return None.
+ */
+static void cli_runner_close(int handle) {
+    JSON_Value *root;
+    JSON_Value *args;
+    char *err = NULL;
+    char *result;
+
+    root = cli_runner_root("close", &args);
+    if (root == NULL) return;
+    json_object_set_number(json_value_get_object(args), "handle", (double)handle);
+    result = cli_runner_call(root, &err);
+    free(result);
+    free(err);
+}
+
+/**
+ * Runs one long-lived runner operation until it finishes or a signal arrives.
+ * @param handle Runner handle.
+ * @param exit_result_out Receives the operation result code.
+ * @param out_err Receives a malloc'd error message on failure.
+ * @return 0 on clean finish, 1 on error, 2 when interrupted by signal.
+ */
+static int cli_runner_wait(int handle, int *exit_result_out, char **out_err) {
+    for (;;) {
+        JSON_Value *root;
+        JSON_Value *args;
+        char *result;
+        JSON_Value *parsed;
+        JSON_Object *res;
+        const char *state;
+
+        if (g_stop_requested) {
+            cli_runner_stop(handle);
+            cli_runner_close(handle);
+            return 2;
+        }
+        root = cli_runner_root("status", &args);
+        if (root == NULL) return 1;
+        json_object_set_number(json_value_get_object(args), "handle", (double)handle);
+        result = cli_runner_call(root, out_err);
+        if (result == NULL) return 1;
+        parsed = json_parse_string(result);
+        free(result);
+        if (parsed == NULL || json_value_get_type(parsed) != JSONObject) {
+            json_value_free(parsed);
+            return 1;
+        }
+        res = json_object_get_object(json_value_get_object(parsed), "result");
+        if (res == NULL) {
+            json_value_free(parsed);
+            return 1;
+        }
+        state = json_object_get_string(res, "state");
+        if (state != NULL && strcmp(state, "finished") == 0) {
+            *exit_result_out = (int)json_object_get_number(res, "result");
+            json_value_free(parsed);
+            return 0;
+        }
+        json_value_free(parsed);
+        cli_sleep_ms(200);
+    }
 }
 
 /**
@@ -300,9 +508,6 @@ static void print_publisher(const char *id, void *userdata) {
  * @return 0 on success, 1 on error.
  */
 int main(int argc, char **argv) {
-    redp2p_t *ctx;
-    int ret;
-
     if (argc < 2) { print_help(argv[0]); return 1; }
     if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) { print_help(argv[0]); return 0; }
     if (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--version") == 0) {
@@ -314,7 +519,6 @@ int main(int argc, char **argv) {
     if (strcmp(argv[1], "idx") == 0) {
         redp2p_options_t opts;
         unsigned short port = 0;
-        char vip_err[256];
         size_t seats;
         int seats_set;
         int seats_option_set;
@@ -322,8 +526,6 @@ int main(int argc, char **argv) {
         int pow_option_set;
         int list_mode;
         int prune_mode;
-        int exit_code;
-        int output_failed;
 
         list_mode = 0;
         prune_mode = 0;
@@ -394,60 +596,103 @@ int main(int argc, char **argv) {
             return 1;
         }
 
-        if (redp2p_open(&ctx) != REDP2P_OK) {
-            fprintf(stderr, "redp2p: failed to create context\n");
-            redp2p_options_free(&opts);
-            return 1;
-        }
         if (list_mode) {
-            output_failed = 0;
-            ret = redp2p_list_publishers(ctx, "127.0.0.1", port,
-                print_publisher, &output_failed);
-            if (ret != REDP2P_OK) {
-                fprintf(stderr, "redp2p: list failed: %s\n",
-                    redp2p_strerror(ret));
-            } else if (fflush(stdout) != 0 || output_failed) {
-                fprintf(stderr, "redp2p: failed to write publisher list\n");
-                ret = REDP2P_ERROR;
+            char *payload;
+            char *result;
+            char *run_err = NULL;
+            JSON_Value *root;
+            JSON_Value *args_value;
+            int list_rc;
+
+            root = json_value_init_object();
+            args_value = json_value_init_object();
+            if (root == NULL || args_value == NULL) {
+                json_value_free(root);
+                json_value_free(args_value);
+                fprintf(stderr, "redp2p: allocation failed\n");
+                redp2p_options_free(&opts);
+                return 1;
             }
-            redp2p_close(ctx);
+            json_object_set_string(json_value_get_object(root), "cmd", "list");
+            json_object_set_string(json_value_get_object(args_value), "host", "127.0.0.1");
+            json_object_set_number(json_value_get_object(args_value), "port", (double)port);
+            json_object_set_value(json_value_get_object(root), "args", args_value);
+            payload = json_serialize_to_string(root);
+            json_value_free(root);
+            if (payload == NULL) {
+                fprintf(stderr, "redp2p: allocation failed\n");
+                redp2p_options_free(&opts);
+                return 1;
+            }
+
+            result = kc_redp2p_run(payload, &run_err);
+            free(payload);
             redp2p_options_free(&opts);
-            return ret == REDP2P_OK ? 0 : 1;
+            if (result == NULL) {
+                fprintf(stderr, "redp2p: list failed: %s\n",
+                    run_err != NULL ? run_err : "unknown error");
+                free(run_err);
+                return 1;
+            }
+            list_rc = kc_redp2p_print_publishers(result);
+            free(result);
+            if (list_rc != 0 || fflush(stdout) != 0) {
+                fprintf(stderr, "redp2p: failed to write publisher list\n");
+                return 1;
+            }
+            return 0;
         }
         if (prune_mode) {
             fprintf(stderr, "redp2p: index pruning runs automatically every 60 seconds\n");
-            redp2p_close(ctx);
             redp2p_options_free(&opts);
             return 0;
         }
-        if (redp2p_set_pass(ctx, opts.pass) != REDP2P_OK) {
-            fprintf(stderr, "redp2p: invalid REDP2P_PASS characters\n");
-            redp2p_close(ctx);
-            redp2p_options_free(&opts);
-            return 1;
-        }
-        if (seats_set && redp2p_set_seats(ctx, seats) != REDP2P_OK) {
-            fprintf(stderr, "redp2p: invalid publisher capacity: %s\n",
-                redp2p_get_error(ctx));
-            redp2p_close(ctx);
-            redp2p_options_free(&opts);
-            return 1;
-        }
-        redp2p_set_pow(ctx, pow_bits);
-        vip_err[0] = '\0';
-        if (redp2p_set_vip(ctx, opts.vip, vip_err, sizeof(vip_err)) != REDP2P_OK) {
-            fprintf(stderr, "redp2p: %s\n", vip_err[0] ? vip_err : "invalid REDP2P_VIP");
-            redp2p_close(ctx);
-            redp2p_options_free(&opts);
-            return 1;
-        }
+        {
+            JSON_Value *root;
+            JSON_Value *args;
+            char *run_err = NULL;
+            int handle;
+            int exit_result;
+            int wait_rc;
 
-        ret = redp2p_serve_index(ctx, NULL, port);
-        fprintf(stderr, "redp2p: index exited: %s\n", redp2p_strerror(ret));
-        exit_code = ret == REDP2P_OK ? 0 : 1;
-        redp2p_close(ctx);
-        redp2p_options_free(&opts);
-        return exit_code;
+            root = cli_runner_root("open", &args);
+            if (root == NULL) {
+                fprintf(stderr, "redp2p: allocation failed\n");
+                redp2p_options_free(&opts);
+                return 1;
+            }
+            json_object_set_string(json_value_get_object(args), "op", "idx");
+            json_object_set_number(json_value_get_object(args), "port", (double)port);
+            if (seats_set) json_object_set_number(json_value_get_object(args), "seats", (double)seats);
+            if (pow_option_set) json_object_set_number(json_value_get_object(args), "pow", (double)pow_bits);
+            if (opts.pass[0] != '\0')
+                json_object_set_string(json_value_get_object(args), "pass", opts.pass);
+            if (opts.vip != NULL)
+                json_object_set_string(json_value_get_object(args), "vip", opts.vip);
+            redp2p_options_free(&opts);
+            if (cli_runner_open(root, &handle, &run_err) != 0) {
+                fprintf(stderr, "redp2p: failed to create context: %s\n",
+                    run_err != NULL ? run_err : "unknown error");
+                free(run_err);
+                return 1;
+            }
+            signal(SIGINT, sigint_handler);
+            signal(SIGTERM, sigint_handler);
+            wait_rc = cli_runner_wait(handle, &exit_result, &run_err);
+            signal(SIGINT, SIG_DFL);
+            signal(SIGTERM, SIG_DFL);
+            if (wait_rc == 1) {
+                fprintf(stderr, "redp2p: index exited: %s\n",
+                    run_err != NULL ? run_err : "unknown error");
+                free(run_err);
+                cli_runner_close(handle);
+                return 1;
+            }
+            cli_runner_close(handle);
+            fprintf(stderr, "redp2p: index exited: %s\n",
+                redp2p_strerror(exit_result));
+            return exit_result == REDP2P_OK ? 0 : 1;
+        }
 
     } else if (strcmp(argv[1], "pub") == 0) {
         redp2p_options_t opts;
@@ -509,40 +754,67 @@ int main(int argc, char **argv) {
 
         if (proto == 0 || service_port == 0) { fprintf(stderr, "redp2p: pub requires --tcp <port> or --udp <port>\n"); redp2p_options_free(&opts); return 1; }
 
-        if (redp2p_open(&ctx) != REDP2P_OK) { fprintf(stderr, "redp2p: failed to create context\n"); redp2p_options_free(&opts); return 1; }
-        if (redp2p_set_pass(ctx, opts.pass) != REDP2P_OK) {
-            fprintf(stderr, "redp2p: invalid REDP2P_PASS characters\n");
-            redp2p_close(ctx);
+        {
+            JSON_Value *root;
+            JSON_Value *args;
+            char *run_err = NULL;
+            int handle;
+            int exit_result;
+            int wait_rc;
+
+            root = cli_runner_root("open", &args);
+            if (root == NULL) {
+                fprintf(stderr, "redp2p: allocation failed\n");
+                redp2p_options_free(&opts);
+                return 1;
+            }
+            json_object_set_string(json_value_get_object(args), "op", "pub");
+            json_object_set_string(json_value_get_object(args), "addr", argv[2]);
+            if (proto == REDP2P_PROTO_TCP) {
+                json_object_set_number(json_value_get_object(args), "tcp", (double)service_port);
+            } else {
+                json_object_set_number(json_value_get_object(args), "udp", (double)service_port);
+            }
+            json_object_set_number(json_value_get_object(args), "sweep", (double)opts.sweep);
+            if (opts.stun_url[0] != '\0')
+                json_object_set_string(json_value_get_object(args), "stun", opts.stun_url);
+            if (opts.pass[0] != '\0')
+                json_object_set_string(json_value_get_object(args), "pass", opts.pass);
             redp2p_options_free(&opts);
-            return 1;
+            if (cli_runner_open(root, &handle, &run_err) != 0) {
+                fprintf(stderr, "redp2p: failed to create context: %s\n",
+                    run_err != NULL ? run_err : "unknown error");
+                free(run_err);
+                return 1;
+            }
+            fprintf(stderr, "redp2p: waiting for connections...\n");
+            signal(SIGINT, sigint_handler);
+            signal(SIGTERM, sigint_handler);
+            wait_rc = cli_runner_wait(handle, &exit_result, &run_err);
+            signal(SIGINT, SIG_DFL);
+            signal(SIGTERM, SIG_DFL);
+            if (wait_rc == 1) {
+                fprintf(stderr, "redp2p: pub exited: %s\n",
+                    run_err != NULL ? run_err : "unknown error");
+                free(run_err);
+                cli_runner_close(handle);
+                return 1;
+            }
+            cli_runner_close(handle);
+            if (exit_result != REDP2P_OK)
+                fprintf(stderr, "redp2p: pub exited: %s\n",
+                    redp2p_strerror(exit_result));
+            return exit_result == REDP2P_OK ? 0 : 1;
         }
-        redp2p_set_protocol(ctx, proto);
-        redp2p_set_port(ctx, service_port);
-        redp2p_set_sweep(ctx, opts.sweep);
-        redp2p_set_stun_url(ctx, opts.stun_url[0] ? opts.stun_url : NULL);
-
-        fprintf(stderr, "redp2p: waiting for connections...\n");
-
-        g_ctx = ctx;
-        signal(SIGINT, sigint_handler);
-        signal(SIGTERM, sigint_handler);
-
-        ret = redp2p_wait(ctx, idx_host, idx_port, host, 0);
-        if (ret != REDP2P_OK)
-            fprintf(stderr, "redp2p: pub exited: %s\n", redp2p_strerror(ret));
-
-        signal(SIGINT, SIG_DFL);
-        signal(SIGTERM, SIG_DFL);
-        g_ctx = NULL;
-
-        redp2p_close(ctx);
-        redp2p_options_free(&opts);
-        return ret == REDP2P_OK ? 0 : 1;
 
     } else if (strcmp(argv[1], "del") == 0) {
         char host[REDP2P_ID_MAX + 1];
         char idx_host[256];
         unsigned short idx_port;
+        JSON_Value *root;
+        JSON_Value *args;
+        char *run_err = NULL;
+        char *result;
 
         if (argc < 3) { fprintf(stderr, "redp2p: usage: %s del <host>@<index[:port]>\n", argv[0]); return 1; }
         if (parse_hostspec(argv[2], host, sizeof(host), idx_host, sizeof(idx_host), &idx_port) != 0) {
@@ -553,14 +825,21 @@ int main(int argc, char **argv) {
             return 1;
         }
 
-        if (redp2p_open(&ctx) != REDP2P_OK) { fprintf(stderr, "redp2p: failed to create context\n"); return 1; }
-        ret = redp2p_deregister(ctx, idx_host, idx_port, host);
-        if (ret != REDP2P_OK) {
-            fprintf(stderr, "redp2p: deregister failed: %s\n", redp2p_strerror(ret));
-            redp2p_close(ctx);
+        root = cli_runner_root("del", &args);
+        if (root == NULL) {
+            fprintf(stderr, "redp2p: allocation failed\n");
             return 1;
         }
-        redp2p_close(ctx);
+        json_object_set_string(json_value_get_object(args), "addr", argv[2]);
+
+        result = cli_runner_call(root, &run_err);
+        if (result == NULL) {
+            fprintf(stderr, "redp2p: deregister failed: %s\n",
+                run_err != NULL ? run_err : "unknown error");
+            free(run_err);
+            return 1;
+        }
+        free(result);
         return 0;
 
     } else if (strcmp(argv[1], "con") == 0) {
@@ -569,7 +848,6 @@ int main(int argc, char **argv) {
         char idx_host[256];
         unsigned short idx_port;
         unsigned short listen_port = 0;
-        char self_id[32];
         int proto = 0;
 
         opts = redp2p_options_default();
@@ -624,29 +902,55 @@ int main(int argc, char **argv) {
 
         if (proto == 0 || listen_port == 0) { fprintf(stderr, "redp2p: con requires --tcp <port> or --udp <port>\n"); redp2p_options_free(&opts); return 1; }
 
-        snprintf(self_id, sizeof(self_id), "c%d", (int)getpid());
+        {
+            JSON_Value *root;
+            JSON_Value *args;
+            char *run_err = NULL;
+            int handle;
+            int exit_result;
+            int wait_rc;
 
-        if (redp2p_open(&ctx) != REDP2P_OK) { fprintf(stderr, "redp2p: failed to create context\n"); redp2p_options_free(&opts); return 1; }
-        redp2p_set_protocol(ctx, proto);
-        redp2p_set_port(ctx, listen_port);
-        redp2p_set_sweep(ctx, opts.sweep);
-        redp2p_set_stun_url(ctx, opts.stun_url[0] ? opts.stun_url : NULL);
-
-        g_ctx = ctx;
-        signal(SIGINT, sigint_handler);
-        signal(SIGTERM, sigint_handler);
-
-        ret = redp2p_connect(ctx, idx_host, idx_port, self_id, host, 0);
-        if (ret != REDP2P_OK)
-            fprintf(stderr, "redp2p: connect failed: %s\n", redp2p_strerror(ret));
-
-        signal(SIGINT, SIG_DFL);
-        signal(SIGTERM, SIG_DFL);
-        g_ctx = NULL;
-
-        redp2p_close(ctx);
-        redp2p_options_free(&opts);
-        return ret == REDP2P_OK ? 0 : 1;
+            root = cli_runner_root("open", &args);
+            if (root == NULL) {
+                fprintf(stderr, "redp2p: allocation failed\n");
+                redp2p_options_free(&opts);
+                return 1;
+            }
+            json_object_set_string(json_value_get_object(args), "op", "con");
+            json_object_set_string(json_value_get_object(args), "addr", argv[2]);
+            if (proto == REDP2P_PROTO_TCP) {
+                json_object_set_number(json_value_get_object(args), "tcp", (double)listen_port);
+            } else {
+                json_object_set_number(json_value_get_object(args), "udp", (double)listen_port);
+            }
+            json_object_set_number(json_value_get_object(args), "sweep", (double)opts.sweep);
+            if (opts.stun_url[0] != '\0')
+                json_object_set_string(json_value_get_object(args), "stun", opts.stun_url);
+            redp2p_options_free(&opts);
+            if (cli_runner_open(root, &handle, &run_err) != 0) {
+                fprintf(stderr, "redp2p: connect failed: %s\n",
+                    run_err != NULL ? run_err : "unknown error");
+                free(run_err);
+                return 1;
+            }
+            signal(SIGINT, sigint_handler);
+            signal(SIGTERM, sigint_handler);
+            wait_rc = cli_runner_wait(handle, &exit_result, &run_err);
+            signal(SIGINT, SIG_DFL);
+            signal(SIGTERM, SIG_DFL);
+            if (wait_rc == 1) {
+                fprintf(stderr, "redp2p: connect failed: %s\n",
+                    run_err != NULL ? run_err : "unknown error");
+                free(run_err);
+                cli_runner_close(handle);
+                return 1;
+            }
+            cli_runner_close(handle);
+            if (exit_result != REDP2P_OK)
+                fprintf(stderr, "redp2p: connect failed: %s\n",
+                    redp2p_strerror(exit_result));
+            return exit_result == REDP2P_OK ? 0 : 1;
+        }
 
     } else {
         fprintf(stderr, "redp2p: unknown command '%s'\n", argv[1]);

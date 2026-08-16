@@ -236,8 +236,8 @@ Publisher storage grows dynamically. Without configured seats, it has no applica
 
 Preserve the existing four-file `src/` layout:
 
-* `src/redp2p.c` owns CLI parsing, environment precedence, messages, and process exit behavior.
-* `src/libredp2p.c` owns all reusable protocol, socket, persistence, punching, index, peer coordination, and transport behavior.
+* `src/redp2p.c` owns CLI parsing, environment precedence, messages, and process exit behavior. The CLI dispatches every subcommand through the runner (`kc_redp2p_run`), keeping its interface unchanged.
+* `src/libredp2p.c` owns all reusable protocol, socket, persistence, punching, index, peer coordination, and transport behavior. It also contains the runner (`kc_redp2p_run`): a bounded slot table (`REDP2P_RUNNER_SLOTS`) that runs the blocking index/publisher/consumer operations in background threads, plus one-shot `del` and `list`.
 * `src/libredp2p.h` is the only library header and defines the public API, limits, result codes, and ownership contract.
 * `src/test.c` contains all project tests.
 
@@ -340,6 +340,9 @@ Relevant areas include:
 * malformed protocol input
 * timeout cleanup
 * stop behavior
+* runner payload validation
+* runner index open/status/close lifecycle
+* runner one-shot list/del results
 * IPv4 and IPv6 behavior
 * shared library use
 
