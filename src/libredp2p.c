@@ -741,7 +741,7 @@ struct redp2p {
     pthread_mutex_t mutex;
 #endif
     char stun_url[512];
-    char keys_dir[REDP2P_KEYS_DIR_MAX + 1];
+    char state_dir[REDP2P_STATE_DIR_MAX + 1];
     char err_buf[256];
     int fault_drop_counter;
     int fault_reorder_counter;
@@ -3784,26 +3784,26 @@ int redp2p_set_stun_url(redp2p_t *ctx, const char *url) {
 }
 
 /**
- * Sets the base directory for publisher deregistration key files.
- * Summary: Overrides the default $HOME/.local/share/redp2p/keys path.
+ * Sets the base state directory for process files (keys, pids).
+ * Summary: Overrides the default $HOME/.local/share/redp2p/ path.
  * When empty, resets to the default path derived from $HOME.
  * @param ctx Open context.
  * @param dir Base directory path (non-NULL).
  * @return REDP2P_OK or REDP2P_EINVAL.
  */
-int redp2p_set_keys_dir(redp2p_t *ctx, const char *dir) {
+int redp2p_set_state_dir(redp2p_t *ctx, const char *dir) {
     if (!ctx) return REDP2P_EINVAL;
     if (dir == NULL) return REDP2P_EINVAL;
     if (dir[0] == '\0') {
-        ctx->keys_dir[0] = '\0';
+        ctx->state_dir[0] = '\0';
         redp2p_set_error(ctx, NULL);
         return REDP2P_OK;
     }
-    if (strlen(dir) >= sizeof(ctx->keys_dir)) {
-        redp2p_set_error(ctx, "keys_dir path is too long");
+    if (strlen(dir) >= sizeof(ctx->state_dir)) {
+        redp2p_set_error(ctx, "state_dir path is too long");
         return REDP2P_EINVAL;
     }
-    strcpy(ctx->keys_dir, dir);
+    strcpy(ctx->state_dir, dir);
     redp2p_set_error(ctx, NULL);
     return REDP2P_OK;
 }
@@ -5453,20 +5453,21 @@ static int redp2p_key_paths(redp2p_t *ctx, const char *index_host,
     char filename[65];
     int n;
 
-    if (ctx->keys_dir[0] != '\0') {
-        base = ctx->keys_dir;
+    if (ctx->state_dir[0] != '\0') {
+        n = snprintf(paths->dir, sizeof(paths->dir),
+            "%s/keys", ctx->state_dir);
     } else {
         base = getenv("HOME");
 #ifdef _WIN32
         if (!base || !base[0]) base = getenv("USERPROFILE");
 #endif
+        if (!base || !base[0]) {
+            redp2p_set_error(ctx, "state: HOME is missing or empty");
+            return REDP2P_ERROR;
+        }
+        n = snprintf(paths->dir, sizeof(paths->dir),
+            "%s/.local/share/redp2p/keys", base);
     }
-    if (!base || !base[0]) {
-        redp2p_set_error(ctx, "key: HOME is missing or empty");
-        return REDP2P_ERROR;
-    }
-    n = snprintf(paths->dir, sizeof(paths->dir),
-        "%s/.local/share/redp2p/keys", base);
     if (n < 0 || (size_t)n >= sizeof(paths->dir)) {
         redp2p_set_error(ctx, "key: HOME path is too long");
         return REDP2P_ERROR;
@@ -8287,9 +8288,9 @@ static char *redp2p_runner_open(JSON_Object *o) {
         return NULL;
     }
     {
-        const char *kd = json_object_get_string(o, "keys_dir");
-        if (kd != NULL && kd[0] != '\0')
-            redp2p_set_keys_dir(slot->ctx, kd);
+        const char *sd = json_object_get_string(o, "state_dir");
+        if (sd != NULL && sd[0] != '\0')
+            redp2p_set_state_dir(slot->ctx, sd);
     }
     if (strcmp(op, "pub") == 0) {
         addr = json_object_get_string(o, "addr");
@@ -8530,9 +8531,9 @@ static char *redp2p_runner_del(JSON_Object *o) {
         return NULL;
     if (redp2p_open(&ctx) != REDP2P_OK) return NULL;
     {
-        const char *kd = json_object_get_string(o, "keys_dir");
-        if (kd != NULL && kd[0] != '\0')
-            redp2p_set_keys_dir(ctx, kd);
+        const char *sd = json_object_get_string(o, "state_dir");
+        if (sd != NULL && sd[0] != '\0')
+            redp2p_set_state_dir(ctx, sd);
     }
     result = redp2p_deregister(ctx, idx_host, idx_port, hostname);
     redp2p_close(ctx);

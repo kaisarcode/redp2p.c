@@ -40,7 +40,7 @@ typedef struct redp2p redp2p_t;
 #define REDP2P_KEY_SZ          16
 #define REDP2P_KEY_STR_SZ      33
 #define REDP2P_PASS_MAX       255
-#define REDP2P_KEYS_DIR_MAX   511
+#define REDP2P_STATE_DIR_MAX  511
 #define REDP2P_UDP_PAYLOAD_MAX 1412
 #define REDP2P_PEER_CANDIDATES_MAX  8
 
@@ -242,7 +242,7 @@ unsigned short bind_port
 
 /**
  * CLIENT: Deregister from an index server over TCP.
- * Used by `redp2p del` and internally on shutdown.
+ * Used internally on shutdown to remove a publisher registration.
  * @return REDP2P_OK on success, or a negative error code.
  */
 int redp2p_deregister(
@@ -327,23 +327,24 @@ const char *url
 );
 
 /**
- * Sets the base directory for publisher deregistration key files.
- * Summary: Overrides the default $HOME/.local/share/redp2p/keys path.
+ * Sets the base state directory for process files (keys, pids).
+ * Summary: Overrides the default $HOME/.local/share/redp2p/ path.
  * When empty, resets to the default path derived from $HOME.
+ * The system creates subdirectories (keys/, pids/) automatically.
  * @param ctx Open context.
  * @param dir Base directory path (non-NULL).
  * @return REDP2P_OK or REDP2P_EINVAL.
  */
-int redp2p_set_keys_dir(
+int redp2p_set_state_dir(
 redp2p_t *ctx,
 const char *dir
 );
 
 /**
  * Executes a CLI subcommand from a JSON payload and returns the result as a
- * JSON string. Synchronous one-shot commands (del, list) run directly.
- * Long-lived commands (open/status/stop/close) manage a background thread
- * per handle so pub, con, and idx run without blocking the caller.
+ * JSON string. Long-lived commands (open/status/stop/close) manage a
+ * background thread per handle so pub, con, and idx run without blocking
+ * the caller. One-shot list runs directly.
  * @param payload_json JSON payload with "cmd" and "args".
  * @param out_err Receives a malloc'd error message on failure, or NULL on
  *     success.

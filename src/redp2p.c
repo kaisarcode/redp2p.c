@@ -1,6 +1,6 @@
 /**
  * redp2p.c - REDP2P.
- * Summary: REDP2P tunnel CLI - idx, pub, del, con.
+ * Summary: REDP2P tunnel CLI - idx, pub, con.
  *
  * Author:  KaisarCode
  * Website: https://kaisarcode.com
@@ -20,6 +20,10 @@
 #include <time.h>
 #include <errno.h>
 #include <signal.h>
+
+#ifdef _WIN32
+#include <direct.h>
+#endif
 
 static volatile sig_atomic_t g_stop_requested = 0;
 
@@ -257,16 +261,19 @@ static void print_help(const char *name) {
     printf("Usage: %s <command> [options]\n", name);
     printf("\n");
     printf("Commands:\n");
-printf("  idx <port> [--seats <N>] [--pow <N>] Start index server\n");
-printf("  idx <port> -l, --list                  List local index publishers\n");
-printf("  idx <port> -p, --prune                 Prune expired index records\n");
+    printf("  idx <port> [--seats <N>] [--pow <N>] Start index server\n");
+    printf("  idx <port> -l, --list                  List local index publishers\n");
+    printf("  idx <port> -p, --prune                 Prune expired index records\n");
+    printf("  idx <port> -d, --down                   Stop a background index\n");
     printf("  pub <host>@<index[:port]> --tcp <port> [--sweep <n>] [--stun <url>]\n");
     printf("  pub <host>@<index[:port]> --udp <port> [--sweep <n>] [--stun <url>]\n");
-    printf("  del <host>@<index[:port]> Deregister from index\n");
+    printf("  pub <host>@<index[:port]> -d, --down    Stop a background publisher\n");
     printf("  con <host>@<index[:port]> --tcp <port> [--sweep <n>] [--stun <url>]\n");
     printf("  con <host>@<index[:port]> --udp <port> [--sweep <n>] [--stun <url>]\n");
+    printf("  con <host>@<index[:port]> -d, --down    Stop a background consumer\n");
     printf("\n");
     printf("Environment:\n");
+    printf("  REDP2P_STATE_DIR          State directory base (default: $HOME/.local/share/redp2p)\n");
     printf("  REDP2P_SEATS              Publisher seats; VIPs count; unset means no limit\n");
     printf("  REDP2P_POW                PoW bits for index registration (0..32)\n");
     printf("  REDP2P_PASS               Optional shared password for REGISTER/pub protection\n");
@@ -501,13 +508,203 @@ static int cli_runner_wait(int handle, int *exit_result_out, char **out_err) {
 }
 
 /**
+ * Sanitizes an address string for use as a PID filename.
+ * Replaces '.', ':', '@' with '_'. Writes into caller-owned buffer.
+ * @param addr Input address string.
+ * @param out  Output buffer.
+ * @param out_sz Output buffer capacity.
+ * @return 0 on success, 1 if output too small.
+ */
+static int cli_sanitize_addr(const char *addr, char *out, size_t out_sz) {
+    size_t i;
+    size_t n;
+
+    if (!addr || !out || out_sz == 0) return 1;
+    n = strlen(addr);
+    if (n >= out_sz) return 1;
+    for (i = 0; i < n; i++) {
+        char c = addr[i];
+        if (c == '.' || c == ':' || c == '@')
+            out[i] = '_';
+        else
+            out[i] = c;
+    }
+    out[n] = '\0';
+    return 0;
+}
+
+/**
+ * Resolves the state directory path.
+ * Priority: cli_flag > REDP2P_STATE_DIR env > $HOME/.local/share/redp2p
+ * @param cli_flag CLI --state-dir value, or NULL.
+ * @param buf Output buffer.
+ * @param buf_sz Output buffer capacity.
+ * @return 0 on success, 1 on failure.
+ */
+static int cli_state_dir(const char *cli_flag, char *buf, size_t buf_sz) {
+    const char *base;
+
+    if (cli_flag && cli_flag[0] != '\0') {
+        snprintf(buf, buf_sz, "%s", cli_flag);
+        return 0;
+    }
+    base = getenv("REDP2P_STATE_DIR");
+    if (base && base[0] != '\0') {
+        snprintf(buf, buf_sz, "%s", base);
+        return 0;
+    }
+    base = getenv("HOME");
+#ifdef _WIN32
+    if (!base || !base[0]) base = getenv("USERPROFILE");
+#endif
+    if (!base || !base[0]) return 1;
+    snprintf(buf, buf_sz, "%s/.local/share/redp2p", base);
+    return 0;
+}
+
+/**
+ * Computes the PID file path for a background process.
+ * @param state_dir State directory base.
+ * @param cmd Command name (idx, pub, con).
+ * @param addr Address string (port for idx, host@index:port for pub/con).
+ * @param buf Output buffer.
+ * @param buf_sz Output buffer capacity.
+ * @return 0 on success, 1 on failure.
+ */
+static int cli_pid_path(const char *state_dir, const char *cmd,
+    const char *addr, char *buf, size_t buf_sz)
+{
+    char safe[256];
+
+    if (strcmp(cmd, "idx") == 0) {
+        snprintf(buf, buf_sz, "%s/pids/%s_%s.pid", state_dir, cmd, addr);
+    } else {
+        if (cli_sanitize_addr(addr, safe, sizeof(safe)) != 0) return 1;
+        snprintf(buf, buf_sz, "%s/pids/%s_%s.pid", state_dir, cmd, safe);
+    }
+    return 0;
+}
+
+/**
+ * Creates parent directories for a file path.
+ * @param path Full file path.
+ * @return 0 on success, -1 on failure.
+ */
+static int cli_mkdir_p(const char *path) {
+    char tmp[1024];
+    char *p;
+    size_t n;
+
+    n = strlen(path);
+    if (n >= sizeof(tmp)) return -1;
+    memcpy(tmp, path, n + 1);
+    for (p = tmp + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = '\0';
+#ifdef _WIN32
+        _mkdir(tmp);
+#else
+        mkdir(tmp, 0755);
+#endif
+        *p = '/';
+    }
+#ifdef _WIN32
+    _mkdir(tmp);
+#else
+    mkdir(tmp, 0755);
+#endif
+    return 0;
+}
+
+/**
+ * Writes the current process PID to a file.
+ * @param pid_path Full path to PID file.
+ * @return 0 on success, 1 on failure.
+ */
+static int cli_pid_write(const char *pid_path) {
+    FILE *f;
+
+    cli_mkdir_p(pid_path);
+    f = fopen(pid_path, "w");
+    if (f == NULL) return 1;
+    fprintf(f, "%d\n", (int)getpid());
+    fclose(f);
+    return 0;
+}
+
+/**
+ * Removes a PID file.
+ * @param pid_path Full path to PID file.
+ * @return None.
+ */
+static void cli_pid_remove(const char *pid_path) {
+    if (pid_path && pid_path[0] != '\0')
+        remove(pid_path);
+}
+
+/**
+ * Stops a background process by PID file.
+ * @param pid_path Full path to PID file.
+ * @return 0 on success, 1 on error.
+ */
+static int cli_pid_stop(const char *pid_path) {
+    FILE *f;
+    long pid;
+
+    f = fopen(pid_path, "r");
+    if (f == NULL) {
+        fprintf(stderr, "redp2p: no background instance found\n");
+        return 1;
+    }
+    if (fscanf(f, "%ld", &pid) != 1 || pid <= 0) {
+        fclose(f);
+        remove(pid_path);
+        fprintf(stderr, "redp2p: invalid PID file\n");
+        return 1;
+    }
+    fclose(f);
+
+#ifdef _WIN32
+    {
+        HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)pid);
+        if (h == NULL) {
+            remove(pid_path);
+            fprintf(stderr, "redp2p: process not running\n");
+            return 1;
+        }
+        TerminateProcess(h, 1);
+        CloseHandle(h);
+    }
+#else
+    {
+        int killed;
+        if (kill((pid_t)pid, 0) != 0) {
+            remove(pid_path);
+            fprintf(stderr, "redp2p: process not running\n");
+            return 1;
+        }
+        killed = kill((pid_t)pid, SIGTERM);
+        if (killed != 0) {
+            fprintf(stderr, "redp2p: failed to signal process\n");
+            return 1;
+        }
+    }
+#endif
+    remove(pid_path);
+    fprintf(stderr, "redp2p: stopped\n");
+    return 0;
+}
+
+/**
  * Program entry point.
- * Summary: Dispatches subcommands (idx, pub, del, con).
+ * Summary: Dispatches subcommands (idx, pub, con).
  * @param argc Argument count.
  * @param argv Argument vector.
  * @return 0 on success, 1 on error.
  */
 int main(int argc, char **argv) {
+    const char *state_dir_flag = NULL;
+
     if (argc < 2) { print_help(argv[0]); return 1; }
     if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) { print_help(argv[0]); return 0; }
     if (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--version") == 0) {
@@ -526,9 +723,11 @@ int main(int argc, char **argv) {
         int pow_option_set;
         int list_mode;
         int prune_mode;
+        int down_mode;
 
         list_mode = 0;
         prune_mode = 0;
+        down_mode = 0;
         seats_set = 0;
         seats_option_set = 0;
         pow_option_set = 0;
@@ -544,6 +743,8 @@ int main(int argc, char **argv) {
                 list_mode = 1;
             } else if (strcmp(argv[i], "--prune") == 0 || strcmp(argv[i], "-p") == 0) {
                 prune_mode = 1;
+            } else if (strcmp(argv[i], "--down") == 0 || strcmp(argv[i], "-d") == 0) {
+                down_mode = 1;
             } else if (strcmp(argv[i], "--seats") == 0) {
                 if (i + 1 >= argc) { fprintf(stderr, "redp2p: --seats requires an argument\n"); redp2p_options_free(&opts); return 1; }
                 if (parse_size(argv[++i], &seats) != 0) {
@@ -594,6 +795,39 @@ int main(int argc, char **argv) {
                 "redp2p: --prune cannot be combined with --list, --seats, or --pow\n");
             redp2p_options_free(&opts);
             return 1;
+        }
+        if (down_mode && (list_mode || prune_mode || seats_option_set || pow_option_set)) {
+            fprintf(stderr,
+                "redp2p: --down cannot be combined with --list, --prune, --seats, or --pow\n");
+            redp2p_options_free(&opts);
+            return 1;
+        }
+
+        if (down_mode) {
+            char sdir[1024];
+            char pidfile[1280];
+            int rc;
+
+            if (port == 0) {
+                fprintf(stderr, "redp2p: usage: %s idx <port> --down\n", argv[0]);
+                redp2p_options_free(&opts);
+                return 1;
+            }
+            redp2p_options_free(&opts);
+            if (cli_state_dir(state_dir_flag, sdir, sizeof(sdir)) != 0) {
+                fprintf(stderr, "redp2p: cannot resolve state directory\n");
+                return 1;
+            }
+            {
+                char port_str[8];
+                snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
+                if (cli_pid_path(sdir, "idx", port_str, pidfile, sizeof(pidfile)) != 0) {
+                    fprintf(stderr, "redp2p: path too long\n");
+                    return 1;
+                }
+            }
+            rc = cli_pid_stop(pidfile);
+            return rc;
         }
 
         if (list_mode) {
@@ -654,6 +888,16 @@ int main(int argc, char **argv) {
             int handle;
             int exit_result;
             int wait_rc;
+            char sdir[1024];
+            char pidfile[1280];
+
+            sdir[0] = '\0';
+            pidfile[0] = '\0';
+            if (port != 0 && cli_state_dir(state_dir_flag, sdir, sizeof(sdir)) == 0) {
+                char port_str[8];
+                snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
+                cli_pid_path(sdir, "idx", port_str, pidfile, sizeof(pidfile));
+            }
 
             root = cli_runner_root("open", &args);
             if (root == NULL) {
@@ -669,6 +913,8 @@ int main(int argc, char **argv) {
                 json_object_set_string(json_value_get_object(args), "pass", opts.pass);
             if (opts.vip != NULL)
                 json_object_set_string(json_value_get_object(args), "vip", opts.vip);
+            if (sdir[0] != '\0')
+                json_object_set_string(json_value_get_object(args), "state_dir", sdir);
             redp2p_options_free(&opts);
             if (cli_runner_open(root, &handle, &run_err) != 0) {
                 fprintf(stderr, "redp2p: failed to create context: %s\n",
@@ -676,11 +922,13 @@ int main(int argc, char **argv) {
                 free(run_err);
                 return 1;
             }
+            if (pidfile[0] != '\0') cli_pid_write(pidfile);
             signal(SIGINT, sigint_handler);
             signal(SIGTERM, sigint_handler);
             wait_rc = cli_runner_wait(handle, &exit_result, &run_err);
             signal(SIGINT, SIG_DFL);
             signal(SIGTERM, SIG_DFL);
+            cli_pid_remove(pidfile);
             if (wait_rc == 1) {
                 fprintf(stderr, "redp2p: index exited: %s\n",
                     run_err != NULL ? run_err : "unknown error");
@@ -701,6 +949,7 @@ int main(int argc, char **argv) {
         unsigned short idx_port;
         unsigned short service_port = 0;
         int proto = 0;
+        int down_mode = 0;
 
         opts = redp2p_options_default();
         redp2p_options_load_env(&opts);
@@ -716,7 +965,9 @@ int main(int argc, char **argv) {
         }
 
         for (int i = 3; i < argc; i++) {
-            if (strcmp(argv[i], "--tcp") == 0) {
+            if (strcmp(argv[i], "--down") == 0 || strcmp(argv[i], "-d") == 0) {
+                down_mode = 1;
+            } else if (strcmp(argv[i], "--tcp") == 0) {
                 if (proto != 0) { fprintf(stderr, "redp2p: choose only one of --tcp or --udp\n"); redp2p_options_free(&opts); return 1; }
                 if (i + 1 >= argc) { fprintf(stderr, "redp2p: --tcp requires a port\n"); redp2p_options_free(&opts); return 1; }
                 if (parse_port(argv[i + 1], &service_port) != 0) {
@@ -752,6 +1003,30 @@ int main(int argc, char **argv) {
             } else { fprintf(stderr, "redp2p: unknown option '%s'\n", argv[i]); redp2p_options_free(&opts); return 1; }
         }
 
+        if (down_mode && (proto != 0 || service_port != 0 || opts.sweep != 0 || opts.stun_url[0] != '\0')) {
+            fprintf(stderr, "redp2p: --down cannot be combined with --tcp, --udp, --sweep, or --stun\n");
+            redp2p_options_free(&opts);
+            return 1;
+        }
+
+        if (down_mode) {
+            char sdir[1024];
+            char pidfile[1280];
+            int rc;
+
+            redp2p_options_free(&opts);
+            if (cli_state_dir(state_dir_flag, sdir, sizeof(sdir)) != 0) {
+                fprintf(stderr, "redp2p: cannot resolve state directory\n");
+                return 1;
+            }
+            if (cli_pid_path(sdir, "pub", argv[2], pidfile, sizeof(pidfile)) != 0) {
+                fprintf(stderr, "redp2p: path too long\n");
+                return 1;
+            }
+            rc = cli_pid_stop(pidfile);
+            return rc;
+        }
+
         if (proto == 0 || service_port == 0) { fprintf(stderr, "redp2p: pub requires --tcp <port> or --udp <port>\n"); redp2p_options_free(&opts); return 1; }
 
         {
@@ -761,6 +1036,13 @@ int main(int argc, char **argv) {
             int handle;
             int exit_result;
             int wait_rc;
+            char sdir[1024];
+            char pidfile[1280];
+
+            sdir[0] = '\0';
+            pidfile[0] = '\0';
+            if (cli_state_dir(state_dir_flag, sdir, sizeof(sdir)) == 0)
+                cli_pid_path(sdir, "pub", argv[2], pidfile, sizeof(pidfile));
 
             root = cli_runner_root("open", &args);
             if (root == NULL) {
@@ -780,6 +1062,8 @@ int main(int argc, char **argv) {
                 json_object_set_string(json_value_get_object(args), "stun", opts.stun_url);
             if (opts.pass[0] != '\0')
                 json_object_set_string(json_value_get_object(args), "pass", opts.pass);
+            if (sdir[0] != '\0')
+                json_object_set_string(json_value_get_object(args), "state_dir", sdir);
             redp2p_options_free(&opts);
             if (cli_runner_open(root, &handle, &run_err) != 0) {
                 fprintf(stderr, "redp2p: failed to create context: %s\n",
@@ -787,12 +1071,14 @@ int main(int argc, char **argv) {
                 free(run_err);
                 return 1;
             }
+            if (pidfile[0] != '\0') cli_pid_write(pidfile);
             fprintf(stderr, "redp2p: waiting for connections...\n");
             signal(SIGINT, sigint_handler);
             signal(SIGTERM, sigint_handler);
             wait_rc = cli_runner_wait(handle, &exit_result, &run_err);
             signal(SIGINT, SIG_DFL);
             signal(SIGTERM, SIG_DFL);
+            cli_pid_remove(pidfile);
             if (wait_rc == 1) {
                 fprintf(stderr, "redp2p: pub exited: %s\n",
                     run_err != NULL ? run_err : "unknown error");
@@ -807,41 +1093,6 @@ int main(int argc, char **argv) {
             return exit_result == REDP2P_OK ? 0 : 1;
         }
 
-    } else if (strcmp(argv[1], "del") == 0) {
-        char host[REDP2P_ID_MAX + 1];
-        char idx_host[256];
-        unsigned short idx_port;
-        JSON_Value *root;
-        JSON_Value *args;
-        char *run_err = NULL;
-        char *result;
-
-        if (argc < 3) { fprintf(stderr, "redp2p: usage: %s del <host>@<index[:port]>\n", argv[0]); return 1; }
-        if (parse_hostspec(argv[2], host, sizeof(host), idx_host, sizeof(idx_host), &idx_port) != 0) {
-            fprintf(stderr, "redp2p: invalid spec '%s' (expected host@index:port)\n", argv[2]); return 1;
-        }
-        if (!redp2p_is_valid_id(host)) {
-            fprintf(stderr, "redp2p: invalid host id '%s'\n", host);
-            return 1;
-        }
-
-        root = cli_runner_root("del", &args);
-        if (root == NULL) {
-            fprintf(stderr, "redp2p: allocation failed\n");
-            return 1;
-        }
-        json_object_set_string(json_value_get_object(args), "addr", argv[2]);
-
-        result = cli_runner_call(root, &run_err);
-        if (result == NULL) {
-            fprintf(stderr, "redp2p: deregister failed: %s\n",
-                run_err != NULL ? run_err : "unknown error");
-            free(run_err);
-            return 1;
-        }
-        free(result);
-        return 0;
-
     } else if (strcmp(argv[1], "con") == 0) {
         redp2p_options_t opts;
         char host[REDP2P_ID_MAX + 1];
@@ -849,6 +1100,7 @@ int main(int argc, char **argv) {
         unsigned short idx_port;
         unsigned short listen_port = 0;
         int proto = 0;
+        int down_mode = 0;
 
         opts = redp2p_options_default();
         redp2p_options_load_env(&opts);
@@ -864,7 +1116,9 @@ int main(int argc, char **argv) {
         }
 
         for (int i = 3; i < argc; i++) {
-            if (strcmp(argv[i], "--tcp") == 0) {
+            if (strcmp(argv[i], "--down") == 0 || strcmp(argv[i], "-d") == 0) {
+                down_mode = 1;
+            } else if (strcmp(argv[i], "--tcp") == 0) {
                 if (proto != 0) { fprintf(stderr, "redp2p: choose only one of --tcp or --udp\n"); redp2p_options_free(&opts); return 1; }
                 if (i + 1 >= argc) { fprintf(stderr, "redp2p: --tcp requires a port\n"); redp2p_options_free(&opts); return 1; }
                 if (parse_port(argv[i + 1], &listen_port) != 0) {
@@ -900,6 +1154,30 @@ int main(int argc, char **argv) {
             } else { fprintf(stderr, "redp2p: unknown option '%s'\n", argv[i]); redp2p_options_free(&opts); return 1; }
         }
 
+        if (down_mode && (proto != 0 || listen_port != 0 || opts.sweep != 0 || opts.stun_url[0] != '\0')) {
+            fprintf(stderr, "redp2p: --down cannot be combined with --tcp, --udp, --sweep, or --stun\n");
+            redp2p_options_free(&opts);
+            return 1;
+        }
+
+        if (down_mode) {
+            char sdir[1024];
+            char pidfile[1280];
+            int rc;
+
+            redp2p_options_free(&opts);
+            if (cli_state_dir(state_dir_flag, sdir, sizeof(sdir)) != 0) {
+                fprintf(stderr, "redp2p: cannot resolve state directory\n");
+                return 1;
+            }
+            if (cli_pid_path(sdir, "con", argv[2], pidfile, sizeof(pidfile)) != 0) {
+                fprintf(stderr, "redp2p: path too long\n");
+                return 1;
+            }
+            rc = cli_pid_stop(pidfile);
+            return rc;
+        }
+
         if (proto == 0 || listen_port == 0) { fprintf(stderr, "redp2p: con requires --tcp <port> or --udp <port>\n"); redp2p_options_free(&opts); return 1; }
 
         {
@@ -909,6 +1187,13 @@ int main(int argc, char **argv) {
             int handle;
             int exit_result;
             int wait_rc;
+            char sdir[1024];
+            char pidfile[1280];
+
+            sdir[0] = '\0';
+            pidfile[0] = '\0';
+            if (cli_state_dir(state_dir_flag, sdir, sizeof(sdir)) == 0)
+                cli_pid_path(sdir, "con", argv[2], pidfile, sizeof(pidfile));
 
             root = cli_runner_root("open", &args);
             if (root == NULL) {
@@ -926,6 +1211,8 @@ int main(int argc, char **argv) {
             json_object_set_number(json_value_get_object(args), "sweep", (double)opts.sweep);
             if (opts.stun_url[0] != '\0')
                 json_object_set_string(json_value_get_object(args), "stun", opts.stun_url);
+            if (sdir[0] != '\0')
+                json_object_set_string(json_value_get_object(args), "state_dir", sdir);
             redp2p_options_free(&opts);
             if (cli_runner_open(root, &handle, &run_err) != 0) {
                 fprintf(stderr, "redp2p: connect failed: %s\n",
@@ -933,11 +1220,13 @@ int main(int argc, char **argv) {
                 free(run_err);
                 return 1;
             }
+            if (pidfile[0] != '\0') cli_pid_write(pidfile);
             signal(SIGINT, sigint_handler);
             signal(SIGTERM, sigint_handler);
             wait_rc = cli_runner_wait(handle, &exit_result, &run_err);
             signal(SIGINT, SIG_DFL);
             signal(SIGTERM, SIG_DFL);
+            cli_pid_remove(pidfile);
             if (wait_rc == 1) {
                 fprintf(stderr, "redp2p: connect failed: %s\n",
                     run_err != NULL ? run_err : "unknown error");

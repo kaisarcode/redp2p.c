@@ -73,10 +73,16 @@ redp2p pub web@idx.example.com:9876 --tcp 8080 \
   --stun stun:stun.cloudflare.com:3478
 ```
 
-Remove a published service from the index:
+Stop a background publisher:
 
 ```bash
-redp2p del web@idx.example.com:9876
+redp2p pub web@idx.example.com:9876 --down
+```
+
+Stop a background index:
+
+```bash
+redp2p idx 9876 --down
 ```
 
 ---
@@ -89,11 +95,13 @@ redp2p del web@idx.example.com:9876
 | `idx <port> --seats <N>`               | Set total publisher seats to `N`               |
 | `idx <port> --pow <N>`                 | Set publisher registration proof-of-work cost |
 | `idx <port> --list`, `idx <port> -l`   | List active publishers from the local index   |
+| `idx <port> --down`, `idx <port> -d`   | Stop a background index                       |
 | `pub <id>@<index[:port]> --tcp <port>` | Publish a local TCP service                   |
 | `pub <id>@<index[:port]> --udp <port>` | Publish a local UDP service                   |
+| `pub <id>@<index[:port]> --down`       | Stop a background publisher                   |
 | `con <id>@<index[:port]> --tcp <port>` | Expose a remote TCP service locally           |
 | `con <id>@<index[:port]> --udp <port>` | Expose a remote UDP service locally           |
-| `del <id>@<index[:port]>`              | Remove a published service                    |
+| `con <id>@<index[:port]> --down`       | Stop a background consumer                   |
 | `--sweep <N>`                          | Set the bounded UDP port sweep range          |
 | `--stun <url>`                         | Enable optional STUN endpoint discovery       |
 | `-h`, `--help`                         | Show help and usage                           |
@@ -110,6 +118,7 @@ CLI flags override environment variables, which override built-in defaults.
 Supported environment variables:
 
 ```text
+REDP2P_STATE_DIR
 REDP2P_PASS
 REDP2P_VIP
 REDP2P_POW
@@ -150,7 +159,7 @@ Payload commands:
 
 | Command | Args | Result |
 | :--- | :--- | :--- |
-| `open` | `op`: `pub`/`con`/`idx`; `addr`: `id@index[:port]` for pub/con; `host`+`port` for idx; `tcp`/`udp` port; `sweep`, `stun`, `pass`, `seats`, `pow`, `vip`, `keys_dir` | `{"result":{"handle":N},"handle":N}` |
+| `open` | `op`: `pub`/`con`/`idx`; `addr`: `id@index[:port]` for pub/con; `host`+`port` for idx; `tcp`/`udp` port; `sweep`, `stun`, `pass`, `seats`, `pow`, `vip`, `state_dir` | `{"result":{"handle":N},"handle":N}` |
 | `status` | `handle` | `{"result":{"state":"running"\|"finished","result":N},"handle":N}` |
 | `stop` | `handle` | `{"result":{"stopped":true},"handle":N}` |
 | `close` | `handle` | `{"result":{"closed":true},"handle":N}` |
@@ -208,17 +217,17 @@ if (redp2p_open(&ctx) == REDP2P_OK) {
 }
 ```
 
-Custom key directory:
+Custom state directory:
 
 ```c
-redp2p_set_keys_dir(ctx, "/data/user/0/com.myapp/files");
+redp2p_set_state_dir(ctx, "/data/user/0/com.myapp/files");
 ```
 
-`redp2p_set_keys_dir(ctx, dir)` sets the base directory for publisher
-deregistration key files. When set, keys are stored under
-`<dir>/.local/share/redp2p/keys/` instead of `$HOME/.local/share/redp2p/keys/`.
-Pass an empty string to reset to the default path. This is useful on Android
-where `$HOME` is not set and apps use a private file directory.
+`redp2p_set_state_dir(ctx, dir)` sets the base directory for process state files.
+When set, keys are stored under `<dir>/keys/` and PID files under `<dir>/pids/`
+instead of under `$HOME/.local/share/redp2p/`. Pass an empty string to reset to
+the default path. This is useful on Android where `$HOME` is not set and apps use
+a private file directory.
 
 List active publishers:
 

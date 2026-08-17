@@ -340,6 +340,30 @@ Internal organization should improve the single implementation file rather than 
 
 Generic extensibility remains outside the project goals.
 
+## State Directory
+
+REDP2P persists two kinds of local state under a single configurable directory:
+
+* **keys/**: Cryptographic key pairs used for publisher deregistration.
+* **pids/**: PID files for background processes started via the CLI.
+
+The state directory resolves in this order:
+
+1. `REDP2P_STATE_DIR` environment variable
+2. `$HOME/.local/share/redp2p/` (POSIX) or `$USERPROFILE/.local/share/redp2p/` (Windows)
+
+The library creates subdirectories automatically. Applications embedding the
+library via `redp2p_set_state_dir()` control where state is stored. On Android,
+this points to the app's private file directory where `$HOME` is unavailable.
+
+PID files enable `--down` / `-d` to gracefully stop background processes by
+sending SIGTERM (or `TerminateProcess` on Windows). The naming scheme encodes
+the subcommand and address to avoid collisions:
+
+* `idx_<port>.pid`
+* `pub_<sanitized_addr>.pid`
+* `con_<sanitized_addr>.pid`
+
 ## Non-goals
 
 REDP2P is not intended to provide:
@@ -395,7 +419,7 @@ The following properties define the project:
 * no TURN-style relay is provided
 * application security remains external
 * index state remains temporary
-* local persisted state is limited to scoped deregistration keys
+* local persisted state is limited to deregistration keys and background process PID files
 * protocol and coordination resource limits remain explicit
 * the implementation remains small and inspectable
 * reusable library behavior remains in the single `src/libredp2p.c` implementation unit unless the project owner explicitly changes the source-layout contract

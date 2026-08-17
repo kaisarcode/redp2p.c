@@ -73,7 +73,7 @@ typedef struct {
     unsigned short bind_port;
     int protocol;
     const char *pass;
-    const char *keys_dir;
+    const char *state_dir;
     _Atomic int result;
     test_thread_t thread;
 } test_publisher_t;
@@ -1339,8 +1339,8 @@ static void *test_publisher_main(void *arg) {
     redp2p_set_protocol(publisher->ctx, publisher->protocol);
     redp2p_set_port(publisher->ctx, publisher->bind_port);
     if (publisher->pass != NULL) redp2p_set_pass(publisher->ctx, publisher->pass);
-    if (publisher->keys_dir != NULL)
-        redp2p_set_keys_dir(publisher->ctx, publisher->keys_dir);
+    if (publisher->state_dir != NULL)
+        redp2p_set_state_dir(publisher->ctx, publisher->state_dir);
     atomic_store(&publisher->result,
         redp2p_wait(publisher->ctx, publisher->host, publisher->index_port,
             publisher->id, publisher->bind_port));
@@ -1542,18 +1542,18 @@ static int test_publisher_start_pass(test_publisher_t *publisher,
 }
 
 /**
- * Starts one keys-dir-configured TCP publisher context.
+ * Starts one state-dir-configured TCP publisher context.
  * @param publisher Publisher state.
  * @param id Publisher id.
  * @param index_port Index control port.
  * @param bind_port Backend port value.
  * @param pass Registration password.
- * @param keys_dir Base directory for key files.
+ * @param state_dir Base directory for process files.
  * @return 0 on success, 1 on failure.
  */
-static int test_publisher_start_keys(test_publisher_t *publisher,
+static int test_publisher_start_state(test_publisher_t *publisher,
     const char *id, unsigned short index_port, unsigned short bind_port,
-    const char *pass, const char *keys_dir)
+    const char *pass, const char *state_dir)
 {
     memset(publisher, 0, sizeof(*publisher));
     publisher->host = TEST_HOST;
@@ -1562,7 +1562,7 @@ static int test_publisher_start_keys(test_publisher_t *publisher,
     publisher->bind_port = bind_port;
     publisher->protocol = REDP2P_PROTO_TCP;
     publisher->pass = pass;
-    publisher->keys_dir = keys_dir;
+    publisher->state_dir = state_dir;
     atomic_init(&publisher->result, 999);
     if (redp2p_open(&publisher->ctx) != REDP2P_OK) return 1;
     if (test_thread_start(&publisher->thread, test_publisher_main,
@@ -3825,10 +3825,10 @@ static int case_redp2p_run_list(void) {
 }
 
 /**
- * Tests redp2p_set_keys_dir API and key persistence with a custom directory.
+ * Tests redp2p_set_state_dir API and key persistence with a custom directory.
  * @return 0 on success, 1 on failure.
  */
-static int case_redp2p_set_keys_dir(void) {
+static int case_redp2p_set_state_dir(void) {
     redp2p_t *ctx;
     test_index_t index;
     test_publisher_t publisher;
@@ -3841,16 +3841,16 @@ static int case_redp2p_set_keys_dir(void) {
 
     rc += expect_int("open ctx", REDP2P_OK, redp2p_open(&ctx));
     if (ctx) {
-        rc += expect_int("set_keys_dir NULL ctx", REDP2P_EINVAL,
-            redp2p_set_keys_dir(NULL, "/tmp"));
-        rc += expect_int("set_keys_dir NULL dir", REDP2P_EINVAL,
-            redp2p_set_keys_dir(ctx, NULL));
-        rc += expect_int("set_keys_dir empty", REDP2P_OK,
-            redp2p_set_keys_dir(ctx, ""));
-        rc += expect_int("set_keys_dir valid", REDP2P_OK,
-            redp2p_set_keys_dir(ctx, "/tmp/redp2p-custom"));
-        rc += expect_int("set_keys_dir long", REDP2P_EINVAL,
-            redp2p_set_keys_dir(ctx,
+        rc += expect_int("set_state_dir NULL ctx", REDP2P_EINVAL,
+            redp2p_set_state_dir(NULL, "/tmp"));
+        rc += expect_int("set_state_dir NULL dir", REDP2P_EINVAL,
+            redp2p_set_state_dir(ctx, NULL));
+        rc += expect_int("set_state_dir empty", REDP2P_OK,
+            redp2p_set_state_dir(ctx, ""));
+        rc += expect_int("set_state_dir valid", REDP2P_OK,
+            redp2p_set_state_dir(ctx, "/tmp/redp2p-custom"));
+        rc += expect_int("set_state_dir long", REDP2P_EINVAL,
+            redp2p_set_state_dir(ctx,
                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -3873,13 +3873,13 @@ static int case_redp2p_set_keys_dir(void) {
 #else
     mkdir(custom_base, 0777);
 #endif
-    snprintf(keys_subdir, sizeof(keys_subdir), "%s/.local/share/redp2p/keys", custom_base);
+    snprintf(keys_subdir, sizeof(keys_subdir), "%s/keys", custom_base);
 
-    rc += expect_int("start index for keys_dir test", 0,
+    rc += expect_int("start index for state_dir test", 0,
         test_index_start(&index, base));
     if (rc == 0) {
-        rc += expect_int("start publisher with keys_dir", 0,
-            test_publisher_start_keys(&publisher, "kdpub", base,
+        rc += expect_int("start publisher with state_dir", 0,
+            test_publisher_start_state(&publisher, "kdpub", base,
                 (unsigned short)(base + 1U), "secret", custom_base));
     }
     if (rc == 0) {
@@ -3935,7 +3935,7 @@ static int run_case(const char *name) {
     if (strcmp(name, "redp2p_set_vip") == 0) return case_redp2p_set_vip();
     if (strcmp(name, "redp2p_set_sweep") == 0) return case_redp2p_set_sweep();
     if (strcmp(name, "redp2p_set_stun_url") == 0) return case_redp2p_set_stun_url();
-    if (strcmp(name, "redp2p_set_keys_dir") == 0) return case_redp2p_set_keys_dir();
+    if (strcmp(name, "redp2p_set_state_dir") == 0) return case_redp2p_set_state_dir();
     if (strcmp(name, "redp2p_run_errors") == 0) return case_redp2p_run_errors();
     if (strcmp(name, "redp2p_run_idx_lifecycle") == 0) return case_redp2p_run_idx_lifecycle();
     if (strcmp(name, "redp2p_run_list") == 0) return case_redp2p_run_list();
