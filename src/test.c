@@ -3834,7 +3834,6 @@ static int case_redp2p_set_keys_dir(void) {
     test_publisher_t publisher;
     char custom_base[768];
     char keys_subdir[PATH_MAX];
-    struct stat status;
     unsigned short base;
     int rc;
 
@@ -3886,7 +3885,15 @@ static int case_redp2p_set_keys_dir(void) {
     if (rc == 0) {
         test_publisher_stop(&publisher);
         test_index_stop(&index);
-        rc += expect_int("key dir created", 0, stat(keys_subdir, &status));
+#ifdef _WIN32
+        rc += expect_int("key dir created", 0,
+            (GetFileAttributesA(keys_subdir) != INVALID_FILE_ATTRIBUTES) ? 0 : 1);
+#else
+        {
+            struct stat status;
+            rc += expect_int("key dir created", 0, stat(keys_subdir, &status));
+        }
+#endif
     } else {
         test_publisher_stop(&publisher);
         test_index_stop(&index);
