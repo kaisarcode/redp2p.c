@@ -7950,9 +7950,9 @@ typedef struct {
     unsigned short bind_port;
     char host[256];
     unsigned short port;
-} redp2p_runner_slot_t;
+} kc_redp2p_runner_slot_t;
 
-static redp2p_runner_slot_t g_runner_slots[REDP2P_RUNNER_SLOTS];
+static kc_redp2p_runner_slot_t g_runner_slots[REDP2P_RUNNER_SLOTS];
 
 /**
  * Locks the runner slot table.
@@ -7984,10 +7984,10 @@ static void redp2p_runner_unlock(void) {
  * @return Thread status.
  */
 static REDP2P_THREAD_RET redp2p_runner_thread(void *arg) {
-    redp2p_runner_slot_t *slot;
+    kc_redp2p_runner_slot_t *slot;
     int result;
 
-    slot = (redp2p_runner_slot_t *)arg;
+    slot = (kc_redp2p_runner_slot_t *)arg;
     if (slot->op == REDP2P_RUNNER_OP_PUB) {
         result = redp2p_wait(slot->ctx, slot->index_host, slot->index_port,
             slot->self_id, slot->bind_port);
@@ -8012,7 +8012,7 @@ static REDP2P_THREAD_RET redp2p_runner_thread(void *arg) {
  * @param slot Runner slot.
  * @return 0 on success, 1 on failure.
  */
-static int redp2p_runner_thread_start(redp2p_runner_slot_t *slot) {
+static int redp2p_runner_thread_start(kc_redp2p_runner_slot_t *slot) {
 #ifdef _WIN32
     slot->thread = CreateThread(NULL, 0, redp2p_runner_thread, slot, 0, NULL);
     return slot->thread != NULL ? 0 : 1;
@@ -8027,7 +8027,7 @@ static int redp2p_runner_thread_start(redp2p_runner_slot_t *slot) {
  * @param slot Runner slot.
  * @return None.
  */
-static void redp2p_runner_thread_join(redp2p_runner_slot_t *slot) {
+static void redp2p_runner_thread_join(kc_redp2p_runner_slot_t *slot) {
 #ifdef _WIN32
     if (slot->thread) {
         WaitForSingleObject(slot->thread, INFINITE);
@@ -8047,7 +8047,7 @@ static void redp2p_runner_thread_join(redp2p_runner_slot_t *slot) {
  * @param out Receives the slot index plus one (handle), or 0 when full.
  * @return 0 on success, 1 when the table is full.
  */
-static int redp2p_runner_slot_alloc(int *out) {
+static int kc_redp2p_runner_slot_alloc(int *out) {
     int i;
 
     redp2p_runner_lock();
@@ -8070,7 +8070,7 @@ static int redp2p_runner_slot_alloc(int *out) {
  * @param handle Handle from a previous open (1..REDP2P_RUNNER_SLOTS).
  * @return Slot pointer, or NULL when the handle is out of range.
  */
-static redp2p_runner_slot_t *redp2p_runner_slot_get(int handle) {
+static kc_redp2p_runner_slot_t *kc_redp2p_runner_slot_get(int handle) {
     if (handle < 1 || handle > REDP2P_RUNNER_SLOTS) return NULL;
     return &g_runner_slots[handle - 1];
 }
@@ -8221,7 +8221,7 @@ static char *redp2p_runner_open(JSON_Object *o) {
     const char *op;
     const char *addr;
     const char *host;
-    redp2p_runner_slot_t *slot;
+    kc_redp2p_runner_slot_t *slot;
     char vip_err[256];
     long number;
     int handle;
@@ -8231,8 +8231,8 @@ static char *redp2p_runner_open(JSON_Object *o) {
     if (strcmp(op, "pub") != 0 && strcmp(op, "con") != 0 &&
         strcmp(op, "idx") != 0)
         return NULL;
-    if (redp2p_runner_slot_alloc(&handle) != 0) return NULL;
-    slot = redp2p_runner_slot_get(handle);
+    if (kc_redp2p_runner_slot_alloc(&handle) != 0) return NULL;
+    slot = kc_redp2p_runner_slot_get(handle);
     memset(slot, 0, sizeof(*slot));
     atomic_store(&slot->state, REDP2P_RUNNER_STATE_RUNNING);
     if (redp2p_open(&slot->ctx) != REDP2P_OK) {
@@ -8377,7 +8377,7 @@ static char *redp2p_runner_open(JSON_Object *o) {
  */
 static char *redp2p_runner_status(JSON_Object *o) {
     long handle_value;
-    redp2p_runner_slot_t *slot;
+    kc_redp2p_runner_slot_t *slot;
     JSON_Value *result_json;
     JSON_Value *v;
     int state;
@@ -8386,7 +8386,7 @@ static char *redp2p_runner_status(JSON_Object *o) {
     v = json_object_get_value(o, "handle");
     if (v == NULL || json_value_get_type(v) != JSONNumber) return NULL;
     handle_value = (long)json_value_get_number(v);
-    slot = redp2p_runner_slot_get((int)handle_value);
+    slot = kc_redp2p_runner_slot_get((int)handle_value);
     if (slot == NULL) return NULL;
     state = atomic_load(&slot->state);
     result_json = json_value_init_object();
@@ -8413,7 +8413,7 @@ static char *redp2p_runner_status(JSON_Object *o) {
  */
 static char *redp2p_runner_stop(JSON_Object *o) {
     long handle_value;
-    redp2p_runner_slot_t *slot;
+    kc_redp2p_runner_slot_t *slot;
     JSON_Value *result_json;
     JSON_Value *v;
     char *out;
@@ -8421,7 +8421,7 @@ static char *redp2p_runner_stop(JSON_Object *o) {
     v = json_object_get_value(o, "handle");
     if (v == NULL || json_value_get_type(v) != JSONNumber) return NULL;
     handle_value = (long)json_value_get_number(v);
-    slot = redp2p_runner_slot_get((int)handle_value);
+    slot = kc_redp2p_runner_slot_get((int)handle_value);
     if (slot == NULL) return NULL;
     if (atomic_load(&slot->state) == REDP2P_RUNNER_STATE_RUNNING)
         redp2p_stop(slot->ctx);
@@ -8441,7 +8441,7 @@ static char *redp2p_runner_stop(JSON_Object *o) {
  */
 static char *redp2p_runner_close(JSON_Object *o) {
     long handle_value;
-    redp2p_runner_slot_t *slot;
+    kc_redp2p_runner_slot_t *slot;
     JSON_Value *result_json;
     JSON_Value *v;
     char *out;
@@ -8449,7 +8449,7 @@ static char *redp2p_runner_close(JSON_Object *o) {
     v = json_object_get_value(o, "handle");
     if (v == NULL || json_value_get_type(v) != JSONNumber) return NULL;
     handle_value = (long)json_value_get_number(v);
-    slot = redp2p_runner_slot_get((int)handle_value);
+    slot = kc_redp2p_runner_slot_get((int)handle_value);
     if (slot == NULL) return NULL;
     if (atomic_load(&slot->state) == REDP2P_RUNNER_STATE_RUNNING)
         redp2p_stop(slot->ctx);
