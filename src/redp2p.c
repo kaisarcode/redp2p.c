@@ -498,7 +498,15 @@ static int cli_runner_wait(int handle, int *exit_result_out, char **out_err) {
         }
         state = json_object_get_string(res, "state");
         if (state != NULL && strcmp(state, "finished") == 0) {
+            const char *detail;
             *exit_result_out = (int)json_object_get_number(res, "result");
+            detail = json_object_get_string(res, "error");
+            if (*exit_result_out != REDP2P_OK && detail != NULL
+                && detail[0] != '\0' && out_err != NULL)
+            {
+                free(*out_err);
+                *out_err = strdup(detail);
+            }
             json_value_free(parsed);
             return 0;
         }
@@ -923,6 +931,8 @@ int main(int argc, char **argv) {
                 return 1;
             }
             if (pidfile[0] != '\0') cli_pid_write(pidfile);
+            fprintf(stderr, "redp2p: index server listening on port %u\n",
+                (unsigned)port);
             signal(SIGINT, sigint_handler);
             signal(SIGTERM, sigint_handler);
             wait_rc = cli_runner_wait(handle, &exit_result, &run_err);
@@ -938,7 +948,8 @@ int main(int argc, char **argv) {
             }
             cli_runner_close(handle);
             fprintf(stderr, "redp2p: index exited: %s\n",
-                redp2p_strerror(exit_result));
+                run_err != NULL ? run_err : redp2p_strerror(exit_result));
+            free(run_err);
             return exit_result == REDP2P_OK ? 0 : 1;
         }
 
@@ -1089,7 +1100,8 @@ int main(int argc, char **argv) {
             cli_runner_close(handle);
             if (exit_result != REDP2P_OK)
                 fprintf(stderr, "redp2p: pub exited: %s\n",
-                    redp2p_strerror(exit_result));
+                    run_err != NULL ? run_err : redp2p_strerror(exit_result));
+            free(run_err);
             return exit_result == REDP2P_OK ? 0 : 1;
         }
 
@@ -1221,6 +1233,7 @@ int main(int argc, char **argv) {
                 return 1;
             }
             if (pidfile[0] != '\0') cli_pid_write(pidfile);
+            fprintf(stderr, "redp2p: connecting to %s...\n", argv[2]);
             signal(SIGINT, sigint_handler);
             signal(SIGTERM, sigint_handler);
             wait_rc = cli_runner_wait(handle, &exit_result, &run_err);
@@ -1237,7 +1250,8 @@ int main(int argc, char **argv) {
             cli_runner_close(handle);
             if (exit_result != REDP2P_OK)
                 fprintf(stderr, "redp2p: connect failed: %s\n",
-                    redp2p_strerror(exit_result));
+                    run_err != NULL ? run_err : redp2p_strerror(exit_result));
+            free(run_err);
             return exit_result == REDP2P_OK ? 0 : 1;
         }
 

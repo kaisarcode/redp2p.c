@@ -840,30 +840,6 @@ static const char *redp2p_get_register_pass(redp2p_t *ctx, const char *id);
 static uint32_t redp2p_load_u32_le(const unsigned char *p);
 
 /**
- * Reports whether detailed stream logs are enabled.
- * @return 1 when stream debug logging is enabled, 0 otherwise.
- */
-static int redp2p_stream_debug_enabled(void) {
-    const char *env;
-
-    env = getenv("REDP2P_DEBUG_STREAM");
-    return env && env[0] != '\0' && strcmp(env, "0") != 0;
-}
-
-/**
- * Emits one conditional debug log line for stream internals.
- * @return None.
- */
-static void redp2p_stream_log(const char *fmt, ...) {
-    va_list ap;
-
-    if (!redp2p_stream_debug_enabled()) return;
-    va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
-    va_end(ap);
-}
-
-/**
  * Returns the configured debug drop cadence for KCP datagrams.
  * @return Drop cadence, or 0 when disabled.
  */
@@ -1187,13 +1163,11 @@ static int redp2p_stream_kcp_output(const char *buf, int len, ikcpcb *kcp,
         adapter->protocol, adapter->session_id, buf, (size_t)len, frame);
     if (frame_len == 0) return -1;
     if (redp2p_stream_should_drop(adapter->ctx)) {
-        redp2p_stream_log("redp2p: stream dropped one KCP datagram\n");
         return 0;
     }
     if (!adapter->fault_pending_used &&
         redp2p_stream_should_reorder(adapter->ctx))
     {
-        redp2p_stream_log("redp2p: stream delayed one KCP datagram\n");
         memcpy(adapter->fault_pending, frame, frame_len);
         adapter->fault_pending_len = frame_len;
         adapter->fault_pending_used = 1;
@@ -1374,14 +1348,10 @@ static int redp2p_stream_process_packet(redp2p_t *ctx,
             REDP2P_STREAM_TYPE_HELLO_ACK) != 0)
             return -1;
         st->ready = 1;
-        redp2p_stream_log("redp2p: tcp session %s KCP ready\n",
-            st->session_hex);
         return 0;
     }
     if (envelope.type == REDP2P_STREAM_TYPE_HELLO_ACK && st->initiator) {
         st->ready = 1;
-        redp2p_stream_log("redp2p: tcp session %s KCP ready\n",
-            st->session_hex);
         return 0;
     }
     if (!st->ready) return 0;
@@ -4051,7 +4021,7 @@ int redp2p_punch_select(redp2p_t *ctx, int sweep_limit, int udp_fd, const char *
 
     (void)ctx;
     if (remote_candidate_count <= 0) {
-        fprintf(stderr, "redp2p: punch failed: no candidates\n");
+        redp2p_set_error(ctx, "punch: no candidates");
         return REDP2P_ERROR;
     }
     if (sweep_limit < 0) sweep_limit = 0;
@@ -4111,22 +4081,16 @@ int redp2p_punch_select(redp2p_t *ctx, int sweep_limit, int udp_fd, const char *
     }
     if (sent_count == 0) {
         redp2p_set_error(ctx, "punch: no valid peer candidates");
-        fprintf(stderr, "redp2p: punch failed: all candidates invalid or unsupported\n");
     } else if (malformed_count > 0) {
         redp2p_set_error(ctx, "punch: malformed peer response");
-        fprintf(stderr, "redp2p: punch failed: malformed peer packet\n");
     } else if (mismatch_count > 0) {
         redp2p_set_error(ctx, "punch: peer session identity mismatch");
-        fprintf(stderr, "redp2p: punch failed: session mismatch\n");
     } else if (unsupported_count > 0) {
         redp2p_set_error(ctx, "punch: peer address family unsupported");
-        fprintf(stderr, "redp2p: punch failed: address family mismatch\n");
     } else if (redp2p_now_ms() >= deadline_ms) {
         redp2p_set_error(ctx, "punch: direct connectivity timed out");
-        fprintf(stderr, "redp2p: punch failed: timeout\n");
     } else {
         redp2p_set_error(ctx, "punch: direct connectivity attempts exhausted");
-        fprintf(stderr, "redp2p: punch failed: all attempts exhausted\n");
     }
     return REDP2P_EPUNCH;
 }
@@ -5292,7 +5256,6 @@ static int redp2p_index_event_loop(redp2p_index_runtime_t *runtime) {
 
     for (;;) {
         if (runtime->ctx->stop_requested) {
-            fprintf(stderr, "redp2p: shutdown requested\n");
             break;
         }
         result = redp2p_index_prepare_fdset(runtime);
@@ -5368,8 +5331,6 @@ int redp2p_serve_index(
     }
     result = redp2p_index_runtime_initialize(&runtime, ctx, host, port);
     if (result != REDP2P_OK) return result;
-    fprintf(stderr, "redp2p: index server listening on %s:%u\n",
-        host ? host : "*", (unsigned)port);
     result = redp2p_index_event_loop(&runtime);
     redp2p_index_runtime_cleanup(&runtime);
     return result == REDP2P_OK ? REDP2P_OK : result;
@@ -6238,7 +6199,6 @@ redp2p_publisher_runtime_t *runtime)
     }
     bits = (int)json_object_get_number(out, "bits");
     json_value_free(response);
-    fprintf(stderr, "redp2p: connecting...\n");
     if (!redp2p_solve_register_pow(ctx, ctx->pass, nonce,
         runtime->borrowed_self_id, bits, solution, sizeof(solution),
         proof, sizeof(proof)))
@@ -6467,8 +6427,7 @@ const struct sockaddr_storage *peer_addr)
     if (session.is_tcp) {
         session.backend_fd = redp2p_connect_local_tcp(ctx->bind_port);
         if (REDP2P_ISERR(session.backend_fd)) {
-            fprintf(stderr,
-                "redp2p: local backend connect failed on 127.0.0.1:%u\n",
+            redp2p_set_error(ctx, "local backend connect failed on port %u",
                 (unsigned)ctx->bind_port);
             crypto_wipe(&session, sizeof(session));
             return 0;
@@ -7116,9 +7075,6 @@ int redp2p_wait(
         return wait_result;
     }
     redp2p_set_error(ctx, NULL);
-    fprintf(stderr, "redp2p: published %s backend 127.0.0.1:%u as '%s'\n",
-        ctx->proto == REDP2P_PROTO_TCP ? "tcp" : "udp",
-        (unsigned)ctx->bind_port, self_id);
     wait_result = redp2p_publisher_event_loop(&runtime);
     redp2p_publisher_remove_registration(&runtime, &wait_result);
     redp2p_publisher_runtime_cleanup(&runtime, 1);
@@ -7328,7 +7284,6 @@ int *skip_iteration)
         session_hex, runtime->self_id, runtime->target_id,
         runtime->peer_candidates, runtime->n_peer_candidates, &peer_addr);
     if (result != REDP2P_OK) {
-        fprintf(stderr, "redp2p: udp punch failed\n");
         REDP2P_FD_CLOSE((int)peer_fd);
         crypto_wipe(session_bin, REDP2P_STREAM_SESSION_ID_SZ);
         crypto_wipe(session_hex, REDP2P_STREAM_SESSION_ID_SZ * 2 + 1);
@@ -7858,9 +7813,6 @@ static int redp2p_consumer_loop(redp2p_consumer_runtime_t *runtime) {
     int result;
 
     result = REDP2P_OK;
-    fprintf(stderr, "redp2p: %s edge adapter on 127.0.0.1:%u for %s\n",
-        runtime->ctx->proto == REDP2P_PROTO_TCP ? "tcp" : "udp",
-        (unsigned)runtime->ctx->bind_port, runtime->target_id);
     redp2p_set_nonblock(runtime->local_fd);
     if (!REDP2P_ISERR(runtime->tcp_listen_fd))
         redp2p_set_nonblock(runtime->tcp_listen_fd);
@@ -8439,6 +8391,8 @@ static char *redp2p_runner_status(JSON_Object *o) {
     state = atomic_load(&slot->state);
     result_json = json_value_init_object();
     if (result_json == NULL) return NULL;
+    json_object_set_string(json_value_get_object(result_json), "error",
+        slot->ctx != NULL ? redp2p_get_error(slot->ctx) : "");
     if (state == REDP2P_RUNNER_STATE_RUNNING) {
         json_object_set_string(json_value_get_object(result_json), "state",
             "running");
