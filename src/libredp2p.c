@@ -7923,7 +7923,6 @@ unsigned short bind_port)
     return result;
 }
 
-#define REDP2P_RUNNER_SLOTS 8
 #define REDP2P_RUNNER_STATE_FREE     0
 #define REDP2P_RUNNER_STATE_RUNNING  1
 #define REDP2P_RUNNER_STATE_FINISHED 2
@@ -7952,7 +7951,9 @@ typedef struct {
     unsigned short port;
 } kc_redp2p_runner_slot_t;
 
-static kc_redp2p_runner_slot_t g_runner_slots[REDP2P_RUNNER_SLOTS];
+static kc_redp2p_runner_slot_t *g_runner_slots = NULL;
+static int g_runner_slots_cap = 0;
+static int g_runner_slots_count = 0;
 
 /**
  * Locks the runner slot table.
@@ -8051,7 +8052,7 @@ static int kc_redp2p_runner_slot_alloc(int *out) {
     int i;
 
     redp2p_runner_lock();
-    for (i = 0; i < REDP2P_RUNNER_SLOTS; i++) {
+    for (i = 0; i < g_runner_slots_count; i++) {
         if (atomic_load(&g_runner_slots[i].state) == REDP2P_RUNNER_STATE_FREE) {
             atomic_store(&g_runner_slots[i].state, REDP2P_RUNNER_STATE_RUNNING);
             atomic_store(&g_runner_slots[i].result, 0);
@@ -8061,17 +8062,33 @@ static int kc_redp2p_runner_slot_alloc(int *out) {
             return 0;
         }
     }
+    if (g_runner_slots_count >= g_runner_slots_cap) {
+        int new_cap = g_runner_slots_cap ? g_runner_slots_cap * 2 : 8;
+        kc_redp2p_runner_slot_t *new_slots = realloc(g_runner_slots, new_cap * sizeof(kc_redp2p_runner_slot_t));
+        if (!new_slots) {
+            redp2p_runner_unlock();
+            return 1;
+        }
+        memset(new_slots + g_runner_slots_cap, 0, (new_cap - g_runner_slots_cap) * sizeof(kc_redp2p_runner_slot_t));
+        g_runner_slots = new_slots;
+        g_runner_slots_cap = new_cap;
+    }
+    atomic_store(&g_runner_slots[g_runner_slots_count].state, REDP2P_RUNNER_STATE_RUNNING);
+    atomic_store(&g_runner_slots[g_runner_slots_count].result, 0);
+    g_runner_slots[g_runner_slots_count].thread = 0;
+    *out = g_runner_slots_count + 1;
+    g_runner_slots_count++;
     redp2p_runner_unlock();
-    return 1;
+    return 0;
 }
 
 /**
  * Returns one runner slot by handle.
- * @param handle Handle from a previous open (1..REDP2P_RUNNER_SLOTS).
+ * @param handle Handle from a previous open (1-based).
  * @return Slot pointer, or NULL when the handle is out of range.
  */
 static kc_redp2p_runner_slot_t *kc_redp2p_runner_slot_get(int handle) {
-    if (handle < 1 || handle > REDP2P_RUNNER_SLOTS) return NULL;
+    if (handle < 1 || handle > g_runner_slots_count) return NULL;
     return &g_runner_slots[handle - 1];
 }
 
