@@ -341,6 +341,13 @@ const char *dir
 );
 
 /**
+ * Returns the bind port for a context.
+ * @param ctx Open context.
+ * @return Bind port, or 0 if not set.
+ */
+uint16_t redp2p_get_bind_port(redp2p_t *ctx);
+
+/**
  * Executes a CLI subcommand from a JSON payload and returns the result as a
  * JSON string. Long-lived commands (open/status/stop/close) manage a
  * background thread per handle so pub, con, and idx run without blocking

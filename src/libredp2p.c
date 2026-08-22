@@ -3779,6 +3779,16 @@ int redp2p_set_state_dir(redp2p_t *ctx, const char *dir) {
 }
 
 /**
+ * Returns the bind port for a context.
+ * @param ctx Open context.
+ * @return Bind port, or 0 if not set.
+ */
+uint16_t redp2p_get_bind_port(redp2p_t *ctx) {
+    if (!ctx) return 0;
+    return ctx->bind_port;
+}
+
+/**
  * Gather candidates.
  * Summary: Gathers candidates for hole punching.
  * @param udp_fd     UDP socket fd.
@@ -8275,7 +8285,7 @@ static char *redp2p_runner_open(JSON_Object *o) {
             atomic_store(&slot->state, REDP2P_RUNNER_STATE_FREE);
             return NULL;
         }
-        slot->bind_port = slot->ctx->bind_port;
+        slot->bind_port = redp2p_get_bind_port(slot->ctx);
         slot->op = REDP2P_RUNNER_OP_PUB;
     } else if (strcmp(op, "con") == 0) {
         addr = json_object_get_string(o, "addr");
@@ -8292,7 +8302,7 @@ static char *redp2p_runner_open(JSON_Object *o) {
             return NULL;
         }
         snprintf(slot->self_id, sizeof(slot->self_id), "c%d", handle);
-        slot->bind_port = slot->ctx->bind_port;
+        slot->bind_port = redp2p_get_bind_port(slot->ctx);
         slot->op = REDP2P_RUNNER_OP_CON;
     } else {
         host = json_object_get_string(o, "host");
