@@ -8213,7 +8213,7 @@ static int redp2p_runner_setup_client(redp2p_t *ctx, JSON_Object *o) {
  * @param handle Handle value.
  * @return malloc'd JSON string, or NULL on allocation failure.
  */
-static char *redp2p_runner_wrap(JSON_Value *result_json, int handle) {
+static char *redp2p_run_wrap(JSON_Value *result_json, int handle) {
     JSON_Value *root;
     char *out;
 
@@ -8382,7 +8382,7 @@ static char *redp2p_runner_open(JSON_Object *o) {
         if (result_json == NULL) return NULL;
         json_object_set_number(json_value_get_object(result_json), "handle",
             handle);
-        out = redp2p_runner_wrap(result_json, handle);
+        out = redp2p_run_wrap(result_json, handle);
         return out;
     }
 }
@@ -8419,7 +8419,7 @@ static char *redp2p_runner_status(JSON_Object *o) {
         json_object_set_number(json_value_get_object(result_json), "result",
             atomic_load(&slot->result));
     }
-    out = redp2p_runner_wrap(result_json, (int)handle_value);
+    out = redp2p_run_wrap(result_json, (int)handle_value);
     return out;
 }
 
@@ -8447,7 +8447,7 @@ static char *redp2p_runner_stop(JSON_Object *o) {
     result_json = json_value_init_object();
     if (result_json == NULL) return NULL;
     json_object_set_boolean(json_value_get_object(result_json), "stopped", 1);
-    out = redp2p_runner_wrap(result_json, (int)handle_value);
+    out = redp2p_run_wrap(result_json, (int)handle_value);
     return out;
 }
 
@@ -8477,7 +8477,7 @@ static char *redp2p_runner_close(JSON_Object *o) {
     result_json = json_value_init_object();
     if (result_json == NULL) return NULL;
     json_object_set_boolean(json_value_get_object(result_json), "closed", 1);
-    out = redp2p_runner_wrap(result_json, (int)handle_value);
+    out = redp2p_run_wrap(result_json, (int)handle_value);
     return out;
 }
 
@@ -8513,7 +8513,7 @@ static char *redp2p_runner_del(JSON_Object *o) {
         JSON_Value *result_json = json_value_init_object();
         if (result_json == NULL) return NULL;
         json_object_set_boolean(json_value_get_object(result_json), "ok", 1);
-        return redp2p_runner_wrap(result_json, 0);
+        return redp2p_run_wrap(result_json, 0);
     }
 }
 
@@ -8565,7 +8565,7 @@ static char *redp2p_runner_list(JSON_Object *o) {
     }
     json_object_set_value(json_value_get_object(result_json), "publishers",
         publishers);
-    return redp2p_runner_wrap(result_json, 0);
+    return redp2p_run_wrap(result_json, 0);
 }
 
 /**
@@ -8616,15 +8616,9 @@ char *kc_redp2p_run(const char *payload_json, char **out_err) {
     }
     result = NULL;
     if (strcmp(cmd, "version") == 0) {
-        JSON_Value *rv = json_value_init_object();
-        JSON_Value *rr = json_value_init_object();
-        JSON_Object *ro = json_value_get_object(rv);
-        JSON_Object *ao = json_value_get_object(rr);
-        json_object_set_number(ao, "version", (double)redp2p_version());
-        json_object_set_value(ro, "result", rr);
-        json_object_set_number(ro, "handle", 0);
-        result = json_serialize_to_string(rv);
-        json_value_free(rv);
+        JSON_Value *result_val = json_value_init_object();
+        json_object_set_number(json_value_get_object(result_val), "version", (double)redp2p_version());
+        result = redp2p_run_wrap(result_val, 0);
     } else if (strcmp(cmd, "open") == 0) {
         result = redp2p_runner_open(args);
     } else if (strcmp(cmd, "status") == 0) {
