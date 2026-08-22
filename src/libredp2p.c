@@ -8615,7 +8615,17 @@ char *kc_redp2p_run(const char *payload_json, char **out_err) {
         return NULL;
     }
     result = NULL;
-    if (strcmp(cmd, "open") == 0) {
+    if (strcmp(cmd, "version") == 0) {
+        JSON_Value *rv = json_value_init_object();
+        JSON_Value *rr = json_value_init_object();
+        JSON_Object *ro = json_value_get_object(rv);
+        JSON_Object *ao = json_value_get_object(rr);
+        json_object_set_number(ao, "version", (double)redp2p_version());
+        json_object_set_value(ro, "result", rr);
+        json_object_set_number(ro, "handle", 0);
+        result = json_serialize_to_string(rv);
+        json_value_free(rv);
+    } else if (strcmp(cmd, "open") == 0) {
         result = redp2p_runner_open(args);
     } else if (strcmp(cmd, "status") == 0) {
         result = redp2p_runner_status(args);
