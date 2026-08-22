@@ -27,6 +27,15 @@ else()
     add_compile_options(/O2 /W3 /WX)
 endif()
 
+# Suppress warnings in vendored source files we don't control.
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    set_source_files_properties(
+        lib/monocypher/monocypher.c
+        lib/kcp/ikcp.c
+        PROPERTIES COMPILE_OPTIONS "-w"
+    )
+endif()
+
 # Shared library
 set(REDP2P_SOURCES
     src/libredp2p.c
